@@ -1,355 +1,454 @@
+import math
+import numbers
+import os
+from functools import partial
+
 import jax
 import jax.numpy as jnp
+import numpy as np
 import xarray as xr
-# import numpy as jnp
-from functools import partial
-from scipy.interpolate import griddata
 from matplotlib.path import Path
+from scipy.interpolate import griddata
 
-# 启用 64 位精度 (对磁流体平衡至关重要)
+# Enable double precision for stellarator equilibria
 jax.config.update("jax_enable_x64", True)
 
+EPS = 1e-12
+
+
+PROFILE_DEFS = {
+    "iotaf": {"label": "Rotational Transform (iota)", "source": "iotaf", "category": "Core"},
+    "q": {
+        "label": "Safety Factor (q)",
+        "source": "iotaf",
+        "transform": lambda arr: 1.0 / (arr + EPS),
+        "category": "Core",
+    },
+    "presf": {"label": "Pressure", "source": "presf", "category": "Pressure"},
+    "betapol": {"label": "beta_pol", "source": "betapol", "category": "Pressure"},
+    "betator": {"label": "beta_tor", "source": "betator", "category": "Pressure"},
+    "beta_vol": {"label": "beta_vol", "source": "beta_vol", "category": "Pressure"},
+    "phi": {"label": "Toroidal Flux", "source": "phi", "category": "Flux"},
+    "phip": {"label": "dPhi/ds", "source": "phipf", "category": "Flux"},
+    "vp": {"label": "Enclosed Volume", "source": "vp", "category": "Flux"},
+    "overr": {"label": "1/R", "source": "over_r", "category": "Geometry"},
+    "buco": {"label": "<B^u>", "source": "buco", "category": "Magnetic"},
+    "bvco": {"label": "<B^v>", "source": "bvco", "category": "Magnetic"},
+    "jcuru": {"label": "<j^u>", "source": "jcuru", "category": "Current"},
+    "jcurv": {"label": "<j^v>", "source": "jcurv", "category": "Current"},
+    "bdotb": {"label": "<B·B>", "source": "bdotb", "category": "Magnetic"},
+    "DMerc": {"label": "Mercier D", "source": "DMerc", "category": "Stability"},
+    "DShear": {"label": "Shear D", "source": "DShear", "category": "Stability"},
+    "DWell": {"label": "Well D", "source": "DWell", "category": "Stability"},
+    "DCurr": {"label": "Current D", "source": "DCurr", "category": "Stability"},
+    "DGeod": {"label": "Geodesic D", "source": "DGeod", "category": "Stability"},
+    "jdotb": {"label": "<J·B>", "source": "jdotb", "category": "Current"},
+    "bdotgradv": {"label": "<B·∇v>", "source": "bdotgradv", "category": "Magnetic"},
+    "specw": {"label": "Spectral Width", "source": "specw", "category": "Diagnostics"},
+    "dpds": {
+        "label": "dP/ds",
+        "source": "presf",
+        "transform": lambda arr, s=None: jnp.gradient(arr, s) if s is not None else arr,
+        "requires_s": True,
+        "category": "Pressure",
+    },
+}
+
+
+FIELD_DEFS = {
+    "geometry": {"label": "Geometry Only", "category": "Geometry"},
+    "modB": {"label": "|B| (Mod B)", "source": "bmnc", "category": "Magnetic"},
+    "jacobian": {"label": "sqrt(g)", "source": "gmnc", "category": "Metric"},
+    "lambda": {"label": "Lambda", "source": "lmns", "category": "Metric"},
+    "B_s": {"label": "B_s (covariant)", "source": "bsubsmns", "category": "Magnetic"},
+    "B_u": {"label": "B_u (covariant)", "source": "bsubumnc", "category": "Magnetic"},
+    "B_v": {"label": "B_v (covariant)", "source": "bsubvmnc", "category": "Magnetic"},
+    "B^u": {"label": "B^u (contravariant)", "source": "bsupumnc", "category": "Magnetic"},
+    "B^v": {"label": "B^v (contravariant)", "source": "bsupvmnc", "category": "Magnetic"},
+    "j^u": {"label": "j^u", "source": "currumnc", "category": "Current"},
+    "j^v": {"label": "j^v", "source": "currvmnc", "category": "Current"},
+}
+
+
+def _mode_from_name(var_name: str) -> str:
+    return "sin" if var_name.endswith("mns") else "cos"
+
+
 class VMECJaxProcessor:
-    def __init__(self, nc_path):
-        # 使用 xarray 惰性加载，不占用显存
-        self.ds = xr.open_dataset(nc_path)
-        
-        # Dimensions
-        self.ns = self.ds.sizes['radius']
-        self.nfp = self.ds['nfp'].values.item()
-        
-        # Coordinates
-        self.xm = self.ds['xm'].values
-        self.xn = self.ds['xn'].values
-        self.xm_nyq = self.ds['xm_nyq'].values
-        self.xn_nyq = self.ds['xn_nyq'].values
+    """JAX accelerated helper around VMEC wout files."""
 
-        # Geometry Coefficients (Full Grid)
-        self.rmnc = self.ds['rmnc'].values # (ns, nmn)
-        self.zmns = self.ds['zmns'].values # (ns, nmn)
-        
-        # Helper to safely get variable
-        def load_var(name):
-            if name in self.ds:
-                return self.ds[name].values
-            return None
+    _CACHE = {}
 
-        # 3D Field Coefficients
-        self.bmnc = load_var('bmnc')
-        self.gmnc = load_var('gmnc')
-        self.bsupumnc = load_var('bsupumnc')
-        self.bsupvmnc = load_var('bsupvmnc')
-        self.currumnc = load_var('currumnc')
-        self.currvmnc = load_var('currvmnc')
-        self.bsubumnc = load_var('bsubumnc')
-        self.bsubvmnc = load_var('bsubvmnc')
-        
-        # 1D Profiles
-        self.iotaf = load_var('iotaf')
-        self.presf = load_var('presf')
-        self.buco = load_var('buco')
-        self.bvco = load_var('bvco')
-        self.jcuru = load_var('jcuru')
-        self.jcurv = load_var('jcurv')
-        self.bdotb = load_var('bdotb')
+    @classmethod
+    def from_file(cls, nc_path: str) -> "VMECJaxProcessor":
+        path = os.path.abspath(nc_path)
+        mtime = os.path.getmtime(path)
+        cached = cls._CACHE.get(path)
+        if cached and getattr(cached, "_mtime", None) == mtime:
+            return cached
+        inst = cls(path)
+        cls._CACHE[path] = inst
+        return inst
 
-    def close(self):
+    def __init__(self, nc_path: str):
+        self.path = os.path.abspath(nc_path)
+        self._mtime = os.path.getmtime(self.path)
+        self.ds = xr.open_dataset(self.path)
+        self.ns = int(self.ds.sizes["radius"])
+        self.nfp = int(self.ds["nfp"].values.item())
+        self.xm = jnp.asarray(self.ds["xm"].values)
+        self.xn = jnp.asarray(self.ds["xn"].values)
+        self.xm_nyq = jnp.asarray(self.ds["xm_nyq"].values)
+        self.xn_nyq = jnp.asarray(self.ds["xn_nyq"].values)
+        self.rmnc = jnp.asarray(self.ds["rmnc"].values)
+        self.zmns = jnp.asarray(self.ds["zmns"].values)
+        self._profile_arrays = {}
+        self._field_arrays = {}
+        self._profile_alias = {spec["label"]: key for key, spec in PROFILE_DEFS.items()}
+        self._field_alias = {spec["label"]: key for key, spec in FIELD_DEFS.items()}
+        self._load_arrays()
+        self._theta_cache = {}
+        self._lcfs_cache = {}
+        self._s_grid = jnp.linspace(0.0, 1.0, self.ns)
+
+    def _load_arrays(self) -> None:
+        for spec in PROFILE_DEFS.values():
+            src = spec.get("source")
+            if src and src in self.ds and src not in self._profile_arrays:
+                self._profile_arrays[src] = jnp.asarray(self.ds[src].values)
+        for spec in FIELD_DEFS.values():
+            src = spec.get("source")
+            if src and src in self.ds and src not in self._field_arrays:
+                self._field_arrays[src] = jnp.asarray(self.ds[src].values)
+
+    def close(self) -> None:
+        if getattr(self, "_closed", False):
+            return
         self.ds.close()
+        self._closed = True
+        cached = self._CACHE.get(self.path)
+        if cached is self:
+            self._CACHE.pop(self.path, None)
 
-    def get_cross_section_grid(self, phi, var_name, res_grid=200):
-        """
-        获取插值并掩膜后的规则网格数据，用于直接绘图。
-        返回: r_lin, z_lin, val_grid (masked)
-        """
-        # 1. 获取原始散点数据 (用于插值)
-        # 使用较高的径向分辨率以保证插值质量
-        # 确保输入是 JAX 数组以避免隐式转换
-        r_raw, z_raw, val_raw = self.get_cross_section_data(phi, var_name, res_s=64, res_u=128)
-        
-        # 2. 获取 LCFS 边界 (用于掩膜)
-        # 直接计算边界 (s_idx = ns - 1)
-        theta = jnp.linspace(0, 2 * jnp.pi, 256)
-        r_c = self.rmnc[-1, :]
-        z_c = self.zmns[-1, :]
-        r_lcfs, z_lcfs = _jit_cross_section(r_c, z_c, self.xm, self.xn, theta, phi)
-        
-        # 3. 创建规则网格
-        # griddata 需要 numpy 数组
-        points = jnp.column_stack((jnp.array(r_raw).flatten(), jnp.array(z_raw).flatten()))
-        values = jnp.array(val_raw).flatten()
-        
-        r_min, r_max = jnp.array(r_lcfs).min(), jnp.array(r_lcfs).max()
-        z_min, z_max = jnp.array(z_lcfs).min(), jnp.array(z_lcfs).max()
-        
-        # 稍微扩大一点范围以免边界被切
+    # ------------------------------------------------------------------
+    # Helpers / metadata
+    # ------------------------------------------------------------------
+    def _get_theta(self, resolution: int) -> jnp.ndarray:
+        if resolution not in self._theta_cache:
+            self._theta_cache[resolution] = jnp.linspace(0.0, 2 * jnp.pi, resolution)
+        return self._theta_cache[resolution]
+
+    def _sanitize_s(self, s_idx: int) -> int:
+        if s_idx < 0:
+            s_idx += self.ns
+        return int(jnp.clip(s_idx, 0, self.ns - 1))
+
+    def _sample_s_indices(self, res_s: int) -> jnp.ndarray:
+        if res_s >= self.ns:
+            return jnp.arange(self.ns, dtype=int)
+        raw = jnp.linspace(0, self.ns - 1, res_s)
+        return jnp.unique(jnp.asarray(jnp.round(raw), dtype=int))
+
+    def _align_profile(self, s_axis: jnp.ndarray, arr: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
+        arr = jnp.asarray(arr)
+        if arr.ndim == 0 or arr.shape == ():
+            arr = jnp.full_like(s_axis, arr)
+            return s_axis, arr
+        if arr.shape[0] == s_axis.shape[0]:
+            return s_axis, arr
+        if arr.shape[0] == s_axis.shape[0] - 1:
+            return s_axis[1:], arr
+        new_s = jnp.linspace(0.0, 1.0, arr.shape[0])
+        return new_s, arr
+
+    def _profile_key(self, var_name: str) -> str:
+        return self._profile_alias.get(var_name, var_name)
+
+    def _field_key(self, var_name: str) -> str:
+        return self._field_alias.get(var_name, var_name)
+
+    def available_profiles(self) -> list[dict]:
+        payload = []
+        for key, spec in PROFILE_DEFS.items():
+            src = spec.get("source")
+            if src and src in self._profile_arrays:
+                payload.append(
+                    {"value": key, "label": spec["label"], "category": spec.get("category", "Profiles")}
+                )
+        return payload
+
+    def available_fields(self) -> list[dict]:
+        payload = []
+        for key, spec in FIELD_DEFS.items():
+            if key == "geometry":
+                payload.append({"value": key, "label": spec["label"], "category": spec.get("category", "")})
+                continue
+            src = spec.get("source")
+            if src and src in self._field_arrays:
+                payload.append(
+                    {"value": key, "label": spec["label"], "category": spec.get("category", "Fields")}
+                )
+        return payload
+
+    def _field_payload(self, var_name: str) -> dict | None:
+        key = self._field_key(var_name)
+        spec = FIELD_DEFS.get(key)
+        if not spec:
+            return None
+        if key == "geometry":
+            return {"key": key, "label": spec["label"], "coeffs": None}
+        src = spec.get("source")
+        coeffs = self._field_arrays.get(src)
+        if coeffs is None:
+            return None
+        mode = spec.get("mode", _mode_from_name(src))
+        use_nyq = coeffs.shape[-1] == self.xm_nyq.shape[0]
+        return {
+            "key": key,
+            "label": spec["label"],
+            "coeffs": coeffs,
+            "mode": mode,
+            "xm": self.xm_nyq if use_nyq else self.xm,
+            "xn": self.xn_nyq if use_nyq else self.xn,
+        }
+
+    # ------------------------------------------------------------------
+    # Scalars / summary information
+    # ------------------------------------------------------------------
+    def _scalar(self, key: str, default: float = jnp.nan) -> float:
+        if key not in self.ds:
+            return float(default)
+        data = self.ds[key].values
+        if isinstance(data, numbers.Number):
+            return float(data)
+        return float(jnp.asarray(data).ravel()[-1])
+
+    def _logical(self, key: str, default: bool = False) -> bool:
+        if key not in self.ds:
+            return default
+        data = self.ds[key].values
+        try:
+            return bool(np.asarray(data).item())
+        except Exception:
+            return default
+
+    def _string(self, key: str) -> str:
+        if key not in self.ds:
+            return ""
+        data = self.ds[key].values
+        if isinstance(data, bytes):
+            return data.decode("utf-8", errors="ignore").strip()
+        arr = np.asarray(data)
+        if arr.dtype.kind in {"S", "U"}:
+            flat = "".join(arr.astype(str).tolist())
+            return flat.strip()
+        if arr.ndim == 0:
+            return str(arr.item()).strip()
+        return str(arr).strip()
+
+    def get_scalars(self) -> dict[str, float]:
+        scalars = {
+            "beta_total": self._scalar("betatotal", 0.0),
+            "betapol": self._scalar("betapol", 0.0),
+            "betator": self._scalar("betator", 0.0),
+            "volume": self._scalar("volume_p", 0.0),
+            "aspect": self._scalar("aspect", 0.0),
+            "b0": self._scalar("b0", 0.0),
+            "Rmajor": self._scalar("Rmajor_p", jnp.nan),
+            "Aminor": self._scalar("Aminor_p", jnp.nan),
+            "rbtor": self._scalar("rbtor", jnp.nan),
+            "ctor": self._scalar("ctor", 0.0),
+        }
+        iota = self._profile_arrays.get("iotaf")
+        pres = self._profile_arrays.get("presf")
+        if iota is not None:
+            scalars["iota_axis"] = float(iota[0])
+            scalars["iota_edge"] = float(iota[-1])
+            scalars["q_axis"] = float(1.0 / (iota[0] + EPS))
+            scalars["q_edge"] = float(1.0 / (iota[-1] + EPS))
+            shear = jnp.gradient(iota, self._s_grid)
+            scalars["shear_edge"] = float(shear[-1])
+        if pres is not None:
+            scalars["pressure_axis"] = float(pres[0])
+            scalars["pressure_edge"] = float(pres[-1])
+        return scalars
+
+    def get_summary_lines(self) -> list[str]:
+        scalars = self.get_scalars()
+        lines = []
+        if "iota_axis" in scalars:
+            lines.append(
+                f"iota_axis={scalars['iota_axis']:.3f}, iota_edge={scalars['iota_edge']:.3f}, "
+                f"q_axis={scalars['q_axis']:.3f}"
+            )
+        if "shear_edge" in scalars:
+            pe = scalars.get("pressure_edge", jnp.nan)
+            lines.append(f"edge shear={scalars['shear_edge']:.3f}, pressure_edge={pe:.3e}")
+        lines.append(
+            f"beta_total={scalars['beta_total']*100:.2f}% | volume={scalars['volume']:.3f} m^3 | B0={scalars['b0']:.3f} T"
+        )
+        if not math.isnan(scalars.get("Rmajor", jnp.nan)):
+            lines.append(
+                f"R_major={scalars['Rmajor']:.3f} m, a_minor={scalars['Aminor']:.3f} m, aspect={scalars['aspect']:.2f}"
+            )
+        boundary_free = self._logical("lfreeb__logical__", False)
+        mgrid = self._string("mgrid_file")
+        if boundary_free or mgrid:
+            boundary_tag = "Free-boundary" if boundary_free else "Fixed-boundary"
+            mgrid_txt = mgrid if mgrid else "no mgrid"
+            lines.append(f"{boundary_tag} equilibrium (mgrid: {mgrid_txt})")
+        lines.append(f"toroidal current={scalars['ctor']:.2f} MA, RB_tor={scalars['rbtor']:.3f} T·m")
+        return lines
+
+    # ------------------------------------------------------------------
+    # 1D profiles
+    # ------------------------------------------------------------------
+    def get_1d_data(self, var_name: str):
+        key = self._profile_key(var_name)
+        spec = PROFILE_DEFS.get(key)
+        base = self._profile_arrays.get(spec.get("source")) if spec else None
+        if spec is None or base is None:
+            s_np = np.asarray(self._s_grid)
+            return s_np, np.zeros_like(s_np)
+        data = base
+        if spec.get("requires_s"):
+            data = spec["transform"](data, self._s_grid)
+        elif "transform" in spec:
+            data = spec["transform"](data)
+        s_axis, data = self._align_profile(self._s_grid, data)
+        return np.asarray(s_axis[1:]), np.asarray(data[1:])
+
+    # ------------------------------------------------------------------
+    # 2D slices
+    # ------------------------------------------------------------------
+    def get_flux_surface_data(self, s_idx: int, var_name: str, res_u: int = 128, res_v: int = 128):
+        payload = self._field_payload(var_name)
+        if payload is None or payload.get("coeffs") is None:
+            return None, None, None
+        idx = self._sanitize_s(s_idx)
+        theta = self._get_theta(res_u)
+        zeta = jnp.linspace(0.0, 2 * jnp.pi / self.nfp, res_v)
+        coeffs = payload["coeffs"][idx]
+        val = _jit_evaluate_2d(coeffs, payload["xm"], payload["xn"], theta, zeta, payload["mode"])
+        return np.asarray(theta), np.asarray(zeta), np.asarray(val)
+
+    def get_cross_section_data(self, phi: float, var_name: str, res_s: int = 48, res_u: int = 160):
+        theta = self._get_theta(res_u)
+        s_indices = self._sample_s_indices(res_s)
+        r_grid, z_grid = _jit_cross_section_batch(
+            self.rmnc[s_indices], self.zmns[s_indices], self.xm, self.xn, theta, phi
+        )
+        payload = self._field_payload(var_name)
+        if payload is None or payload.get("coeffs") is None or payload.get("key") == "geometry":
+            val_grid = jnp.tile((s_indices / (self.ns - 1))[:, None], (1, theta.size))
+        else:
+            coeffs = payload["coeffs"][s_indices]
+            if coeffs.shape[0] > 1 and s_indices[0] == 0:
+                coeffs = coeffs.at[0].set(coeffs[1])
+            val_grid = _jit_evaluate_line_batch(
+                coeffs, payload["xm"], payload["xn"], theta, phi, payload["mode"]
+            )
+        return np.asarray(r_grid), np.asarray(z_grid), np.asarray(val_grid)
+
+    def _lcfs(self, phi: float, resolution: int = 256):
+        key = (float(phi), resolution)
+        if key not in self._lcfs_cache:
+            theta = self._get_theta(resolution)
+            r, z = _jit_cross_section_batch(self.rmnc[-1], self.zmns[-1], self.xm, self.xn, theta, phi)
+            self._lcfs_cache[key] = (r.reshape(-1), z.reshape(-1))
+        return self._lcfs_cache[key]
+
+    def get_cross_section_grid(self, phi: float, var_name: str, res_grid: int = 200):
+        r_raw, z_raw, val_raw = self.get_cross_section_data(phi, var_name)
+        r_lcfs, z_lcfs = self._lcfs(phi)
+        points = np.column_stack((np.asarray(r_raw).reshape(-1), np.asarray(z_raw).reshape(-1)))
+        values = np.asarray(val_raw).reshape(-1)
+        r_min, r_max = float(jnp.min(r_lcfs)), float(jnp.max(r_lcfs))
+        z_min, z_max = float(jnp.min(z_lcfs)), float(jnp.max(z_lcfs))
         pad_r = (r_max - r_min) * 0.05
         pad_z = (z_max - z_min) * 0.05
-        
         r_lin = jnp.linspace(r_min - pad_r, r_max + pad_r, res_grid)
         z_lin = jnp.linspace(z_min - pad_z, z_max + pad_z, res_grid)
         r_mesh, z_mesh = jnp.meshgrid(r_lin, z_lin)
-        
-        # 4. 插值
-        val_grid = griddata(points, values, (r_mesh, z_mesh), method='linear')
-        
-        # 5. 掩膜 (Masking)
-        # 创建 LCFS 多边形路径
-        lcfs_poly = jnp.column_stack((r_lcfs, z_lcfs))
-        path = Path(lcfs_poly)
-        
-        # 检查网格点是否在多边形内
-        # flatten mesh points
-        mesh_points = jnp.column_stack((r_mesh.flatten(), z_mesh.flatten()))
-        mask = path.contains_points(mesh_points)
-        mask = mask.reshape(r_mesh.shape)
-        
-        # 应用掩膜
-        val_grid[~mask] = jnp.nan
-        
-        return r_lin, z_lin, val_grid
+        r_mesh_np = np.asarray(r_mesh)
+        z_mesh_np = np.asarray(z_mesh)
+        val_grid = griddata(points, values, (r_mesh_np, z_mesh_np), method="linear")
+        lcfs_poly = np.column_stack((np.asarray(r_lcfs), np.asarray(z_lcfs)))
+        mask = Path(lcfs_poly).contains_points(np.column_stack((r_mesh_np.ravel(), z_mesh_np.ravel())))
+        mask = mask.reshape(r_mesh_np.shape)
+        val_grid[~mask] = np.nan
+        return np.asarray(r_lin), np.asarray(z_lin), val_grid
 
-    def get_scalars(self):
-        """获取标量概览"""
-        def _safe_get(key):
-            if key not in self.ds: return 0.0
-            val = self.ds[key].values
-            return val.item() if val.ndim == 0 else val[-1]
-            
-        return {
-            "beta_total": _safe_get('betatotal'),
-            "volume": _safe_get('volume'),
-            "aspect": _safe_get('aspect'),
-            "b0": _safe_get('b0')
-        }
-
-    def get_1d_data(self, var_name):
-        """获取 1D 剖面数据"""
-        s = jnp.linspace(0, 1, self.ns)
-        
-        # Mapping of UI names to internal variables
-        if var_name == 'iota':
-            val = self.iotaf
-        elif var_name == 'q':
-            val = 1.0 / (self.iotaf + 1e-9)
-        elif var_name == 'pressure':
-            val = self.presf
-        elif var_name == '<Buco>':
-            val = self.buco
-        elif var_name == '<Bvco>':
-            val = self.bvco
-        elif var_name == '<jcuru>':
-            val = self.jcuru
-        elif var_name == '<jcurv>':
-            val = self.jcurv
-        elif var_name == '<B.B>':
-            val = self.bdotb
-        else:
-            return s, jnp.zeros_like(s)
-            
-        if val is None:
-            return s, jnp.zeros_like(s)
-            
-        # Handle potential shape mismatches (some might be on half-grid)
-        # For visualization, simple interpolation or truncation is usually enough
-        if len(val) == self.ns:
-            return s, val
-        elif len(val) == self.ns - 1:
-            # Append last point or interpolate? Let's just prepend 0 or duplicate
-            return s[1:], val
-        
-        return s, val
-
-    def get_flux_surface_data(self, s_idx, var_name, res_u=64, res_v=64):
-        """计算特定磁面上的 2D 分布 (Theta vs Zeta)"""
-        if s_idx < 0: s_idx += self.ns
-        s_idx = jnp.clip(s_idx, 0, self.ns - 1)
-
-        theta = jnp.linspace(0, 2 * jnp.pi, res_u)
-        zeta = jnp.linspace(0, 2 * jnp.pi / self.nfp, res_v) # One field period
-        
-        # Select coefficients based on variable
-        coeffs, mode_type, use_nyq = self._get_coeffs(var_name, s_idx)
-        
-        if coeffs is None:
-            return None, None, None
-
-        xm = self.xm_nyq if use_nyq else self.xm
-        xn = self.xn_nyq if use_nyq else self.xn
-        
-        val = _jit_evaluate_2d(coeffs, xm, xn, theta, zeta, mode_type)
-        
-        return jnp.array(theta), jnp.array(zeta), jnp.array(val)
-
-    def get_cross_section_data(self, phi, var_name, res_s=30, res_u=120):
-        """计算特定环向角截面上的分布 (R vs Z)"""
-        # Grid: s (radial) x u (poloidal)
-        s_indices = jnp.linspace(0, self.ns - 1, res_s).astype(int)
-        theta = jnp.linspace(0, 2 * jnp.pi, res_u)
-        
-        # 1. Calculate Geometry (R, Z) for the grid
-        # We need R(s, u, phi) and Z(s, u, phi)
-        # Batch compute for all s indices
-        
-        r_grid = []
-        z_grid = []
-        val_grid = []
-        
-        # Pre-compile geometry function for single phi
-        # We can reuse _jit_cross_section but we need it for multiple surfaces
-        
-        for s_idx in s_indices:
-            # Geometry
-            r_c = self.rmnc[s_idx, :]
-            z_c = self.zmns[s_idx, :]
-            r, z = _jit_cross_section(r_c, z_c, self.xm, self.xn, theta, phi)
-            r_grid.append(r)
-            z_grid.append(z)
-            
-            # Value
-            if var_name == 'geometry':
-                val_grid.append(jnp.full_like(r, s_idx/(self.ns-1)))
-            else:
-                # FIX: Handle axis singularity (s=0)
-                # Use s=1 coefficients for value and average them to get a unique axis value
-                is_axis = (s_idx == 0)
-                calc_s_idx = 1 if (is_axis and self.ns > 1) else s_idx
-                
-                coeffs, mode_type, use_nyq = self._get_coeffs(var_name, calc_s_idx)
-                
-                if coeffs is not None:
-                    xm = self.xm_nyq if use_nyq else self.xm
-                    xn = self.xn_nyq if use_nyq else self.xn
-                    # Evaluate at specific phi (zeta)
-                    val = _jit_evaluate_line(coeffs, xm, xn, theta, phi, mode_type)
-                    
-                    if is_axis:
-                        # Axis must be single-valued
-                        val = jnp.full_like(val, jnp.mean(val))
-                        
-                    val_grid.append(val)
-                else:
-                    val_grid.append(jnp.zeros_like(r))
-
-        return jnp.array(r_grid), jnp.array(z_grid), jnp.array(val_grid)
-
-    def _get_coeffs(self, var_name, s_idx):
-        """Helper to select coefficients"""
-        # Returns: (coeffs, mode_type='cos'/'sin', use_nyq=True/False)
-        if var_name == '|B|': return self.bmnc[s_idx], 'cos', True
-        if var_name == 'sqrt(g)': return self.gmnc[s_idx], 'cos', True
-        if var_name == 'B^u': return self.bsupumnc[s_idx], 'cos', True
-        if var_name == 'B^v': return self.bsupvmnc[s_idx], 'cos', True
-        if var_name == 'j^u': return self.currumnc[s_idx], 'cos', True
-        if var_name == 'j^v': return self.currvmnc[s_idx], 'cos', True
-        if var_name == 'B_u': return self.bsubumnc[s_idx], 'cos', True
-        if var_name == 'B_v': return self.bsubvmnc[s_idx], 'cos', True
-        return None, 'cos', False
-
-    def compute_3d_surface(self, s_idx=-1, var_name='|B|', resolution=128):
-        """计算 3D 磁面几何及物理量分布"""
-        # 处理索引
-        if s_idx < 0: s_idx += self.ns
-        s_idx = jnp.clip(s_idx, 0, self.ns - 1)
-
-        # 获取几何系数
-        r_c = self.rmnc[s_idx, :]
-        z_c = self.zmns[s_idx, :]
-        
-        # 获取物理量系数
-        if var_name == 'geometry':
-            # 如果是纯几何，颜色可以设为常数或半径
-            coeffs = None
-            mode_type = 'cos'
-            use_nyq = False
-        else:
-            coeffs, mode_type, use_nyq = self._get_coeffs(var_name, s_idx)
-        
-        theta = jnp.linspace(0, 2 * jnp.pi, resolution)
-        phi = jnp.linspace(0, 2 * jnp.pi, resolution) # Full torus for 3D view usually
-        
-        # 准备物理量计算所需的频率数组
-        if coeffs is not None:
-            xm_var = self.xm_nyq if use_nyq else self.xm
-            xn_var = self.xn_nyq if use_nyq else self.xn
-        else:
-            # Dummy
-            xm_var = self.xm
-            xn_var = self.xn
-            coeffs = jnp.zeros_like(self.xm) # Zero value
-
-        # 调用 JIT 编译函数
+    # ------------------------------------------------------------------
+    # 3D geometry
+    # ------------------------------------------------------------------
+    def compute_3d_surface(self, s_idx: int = -1, var_name: str = "modB", resolution: int = 128):
+        idx = self._sanitize_s(s_idx)
+        theta = self._get_theta(resolution)
+        phi = self._get_theta(resolution)
+        payload = self._field_payload(var_name)
+        coeffs = None
+        xm_var, xn_var, mode = self.xm, self.xn, "cos"
+        if payload and payload.get("coeffs") is not None and payload.get("key") != "geometry":
+            coeffs = payload["coeffs"][idx]
+            xm_var, xn_var, mode = payload["xm"], payload["xn"], payload["mode"]
         x, y, z, val = _jit_surface_3d(
-            r_c, z_c, coeffs, 
-            self.xm, self.xn, xm_var, xn_var,
-            theta, phi, mode_type
+            self.rmnc[idx],
+            self.zmns[idx],
+            coeffs if coeffs is not None else jnp.zeros_like(self.rmnc[idx]),
+            self.xm,
+            self.xn,
+            xm_var,
+            xn_var,
+            theta,
+            phi,
+            mode,
         )
-        
-        return jnp.array(x), jnp.array(y), jnp.array(z), jnp.array(val)
+        return np.asarray(x), np.asarray(y), np.asarray(z), np.asarray(val)
 
 
-# ---------------------------------------------------------
-# JAX JIT Compiled Kernels (纯函数，极速执行)
-# ---------------------------------------------------------
-
+# ----------------------------------------------------------------------
+# JAX kernels
+# ----------------------------------------------------------------------
 @jax.jit
-def _jit_cross_section(rmnc, zmns, xm, xn, theta, phi):
-    # Broadcasting: (N_coeffs, N_theta)
+def _jit_cross_section_batch(rmnc, zmns, xm, xn, theta, phi):
+    if rmnc.ndim == 1:
+        rmnc = rmnc[None, :]
+        zmns = zmns[None, :]
     angle = jnp.outer(xm, theta) - jnp.outer(xn, jnp.full_like(theta, phi))
-    
-    # Summation
-    r = jnp.sum(rmnc[:, None] * jnp.cos(angle), axis=0)
-    z = jnp.sum(zmns[:, None] * jnp.sin(angle), axis=0)
+    cos_terms = jnp.cos(angle)
+    sin_terms = jnp.sin(angle)
+    r = rmnc @ cos_terms
+    z = zmns @ sin_terms
     return r, z
 
-@partial(jax.jit, static_argnames=['mode'])
-def _jit_evaluate_2d(coeffs, xm, xn, theta, zeta, mode):
-    # theta: (Nu,), zeta: (Nv,)
-    # angle: (N_coeffs, Nu, Nv)
-    theta_grid, zeta_grid = jnp.meshgrid(theta, zeta, indexing='ij')
-    
-    angle = (xm[:, None, None] * theta_grid[None, :, :]) - \
-            (xn[:, None, None] * zeta_grid[None, :, :])
-            
-    if mode == 'cos':
-        val = jnp.sum(coeffs[:, None, None] * jnp.cos(angle), axis=0)
-    else:
-        val = jnp.sum(coeffs[:, None, None] * jnp.sin(angle), axis=0)
-    return val
 
-@partial(jax.jit, static_argnames=['mode'])
-def _jit_evaluate_line(coeffs, xm, xn, theta, phi, mode):
-    # theta: (Nu,), phi: scalar
+@partial(jax.jit, static_argnames=["mode"])
+def _jit_evaluate_line_batch(coeffs, xm, xn, theta, phi, mode):
+    if coeffs.ndim == 1:
+        coeffs = coeffs[None, :]
     angle = jnp.outer(xm, theta) - jnp.outer(xn, jnp.full_like(theta, phi))
-    
-    if mode == 'cos':
-        val = jnp.sum(coeffs[:, None] * jnp.cos(angle), axis=0)
-    else:
-        val = jnp.sum(coeffs[:, None] * jnp.sin(angle), axis=0)
-    return val
+    trig = jnp.cos(angle) if mode == "cos" else jnp.sin(angle)
+    return coeffs @ trig
 
-@partial(jax.jit, static_argnames=['mode'])
+
+@partial(jax.jit, static_argnames=["mode"])
+def _jit_evaluate_2d(coeffs, xm, xn, theta, zeta, mode):
+    theta_grid, zeta_grid = jnp.meshgrid(theta, zeta, indexing="ij")
+    angle = (xm[:, None, None] * theta_grid[None, :, :]) - (xn[:, None, None] * zeta_grid[None, :, :])
+    trig = jnp.cos(angle) if mode == "cos" else jnp.sin(angle)
+    return jnp.sum(coeffs[:, None, None] * trig, axis=0)
+
+
+@partial(jax.jit, static_argnames=["mode"])
 def _jit_surface_3d(rmnc, zmns, coeffs, xm, xn, xm_var, xn_var, theta, phi, mode):
-    # Meshgrid in JAX
-    theta_grid, phi_grid = jnp.meshgrid(theta, phi, indexing='ij')
-    
-    # 几何重建
-    # Angle shape: (N_coeffs, Res, Res)
-    angle_geom = (xm[:, None, None] * theta_grid[None, :, :]) - \
-                 (xn[:, None, None] * phi_grid[None, :, :])
-                 
+    theta_grid, phi_grid = jnp.meshgrid(theta, phi, indexing="ij")
+    angle_geom = (xm[:, None, None] * theta_grid[None, :, :]) - (xn[:, None, None] * phi_grid[None, :, :])
     r = jnp.sum(rmnc[:, None, None] * jnp.cos(angle_geom), axis=0)
     z_val = jnp.sum(zmns[:, None, None] * jnp.sin(angle_geom), axis=0)
-    
     x_val = r * jnp.cos(phi_grid)
     y_val = r * jnp.sin(phi_grid)
-    
-    # 物理量重建
-    angle_var = (xm_var[:, None, None] * theta_grid[None, :, :]) - \
-                (xn_var[:, None, None] * phi_grid[None, :, :])
-    
-    if mode == 'cos':
-        val = jnp.sum(coeffs[:, None, None] * jnp.cos(angle_var), axis=0)
-    else:
-        val = jnp.sum(coeffs[:, None, None] * jnp.sin(angle_var), axis=0)
-    
+    angle_var = (xm_var[:, None, None] * theta_grid[None, :, :]) - (xn_var[:, None, None] * phi_grid[None, :, :])
+    trig = jnp.cos(angle_var) if mode == "cos" else jnp.sin(angle_var)
+    val = jnp.sum(coeffs[:, None, None] * trig, axis=0)
     return x_val, y_val, z_val, val

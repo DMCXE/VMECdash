@@ -1,0 +1,12 @@
+dash>=2.16.1
+dash-mantine-components>=0.14.5
+dash-iconify>=0.1.2
+plotly>=5.22.0
+numpy>=1.24.0
+scipy>=1.11.0
+matplotlib>=3.8.0
+xarray>=2024.1.0
+netCDF4>=1.6.5
+pandas>=2.2.0
+jax>=0.4.26
+jaxlib>=0.4.26

@@ -8,8 +8,6 @@ import base64
 import tempfile
 import os
 import numpy as np
-from scipy.interpolate import griddata
-from dash import Patch
 
 # 引入 JAX 后端
 from vmec_jax import VMECJaxProcessor
@@ -45,6 +43,15 @@ def create_stat_card(title, value, icon_name, color):
         shadow="xs"
     )
 
+
+def build_select_data(options):
+    data = []
+    for opt in options or []:
+        category = opt.get("category")
+        prefix = f"[{category}] " if category else ""
+        data.append({"label": f"{prefix}{opt['label']}", "value": opt["value"]})
+    return data
+
 # -----------------------
 # Control Panels
 # -----------------------
@@ -55,16 +62,14 @@ controls_1d = html.Div(
     style={"display": "none"},
     children=[
         dmc.Select(
-            id="control-var-1d", label="Variable", value="iota",
+            id="control-var-1d", label="Variable", value="iotaf",
             data=[
-                {"label": "Rotational Transform (iota)", "value": "iota"},
+                {"label": "Rotational Transform (iota)", "value": "iotaf"},
                 {"label": "Safety Factor (q)", "value": "q"},
-                {"label": "Pressure", "value": "pressure"},
-                {"label": "<B^u> (Flux Avg)", "value": "<Buco>"},
-                {"label": "<B^v> (Flux Avg)", "value": "<Bvco>"},
-                {"label": "<j^u> (Flux Avg)", "value": "<jcuru>"},
-                {"label": "<j^v> (Flux Avg)", "value": "<jcurv>"},
-                {"label": "<B·B> (Flux Avg)", "value": "<B.B>"},
+                {"label": "Pressure", "value": "presf"},
+                {"label": "Enclosed Volume (Vp)", "value": "vp"},
+                {"label": "<j^u> (Flux Avg)", "value": "jcuru"},
+                {"label": "<B·B> (Flux Avg)", "value": "bdotb"},
             ],
             mb="md"
         )
@@ -91,14 +96,13 @@ controls_2d = html.Div(
             id="control-var-2d", label="Color Variable", value="geometry",
             data=[
                 {"label": "Geometry Only (None)", "value": "geometry"},
-                {"label": "|B| (Mod B)", "value": "|B|"},
-                {"label": "sqrt(g) (Jacobian)", "value": "sqrt(g)"},
+                {"label": "|B| (Mod B)", "value": "modB"},
+                {"label": "sqrt(g) (Jacobian)", "value": "jacobian"},
+                {"label": "Lambda", "value": "lambda"},
                 {"label": "B^u (Contravariant)", "value": "B^u"},
                 {"label": "B^v (Contravariant)", "value": "B^v"},
                 {"label": "j^u (Current)", "value": "j^u"},
                 {"label": "j^v (Current)", "value": "j^v"},
-                {"label": "B_u (Covariant)", "value": "B_u"},
-                {"label": "B_v (Covariant)", "value": "B_v"},
             ],
             mb="md"
         ),
@@ -140,11 +144,11 @@ controls_3d = html.Div(
             mb="md"
         ),
         dmc.Select(
-            id="control-var-3d", label="Color Variable", value="|B|",
+            id="control-var-3d", label="Color Variable", value="modB",
             data=[
                 {"label": "Geometry Only (Solid)", "value": "geometry"},
-                {"label": "|B| (Mod B)", "value": "|B|"},
-                {"label": "sqrt(g) (Jacobian)", "value": "sqrt(g)"},
+                {"label": "|B| (Mod B)", "value": "modB"},
+                {"label": "sqrt(g) (Jacobian)", "value": "jacobian"},
                 {"label": "B^u", "value": "B^u"},
                 {"label": "B^v", "value": "B^v"},
                 {"label": "j^u", "value": "j^u"},
@@ -165,6 +169,13 @@ controls_3d = html.Div(
             ),
             dmc.ActionIcon(get_icon("tabler:plus"), id="btn-s3d-inc", variant="light", color="indigo"),
         ], gap="xs", align="center"),
+        dmc.Switch(
+            id="control-3d-bg",
+            label="Coordinate-free background",
+            checked=True,
+            mt="md",
+            color="indigo"
+        )
     ]
 )
 
@@ -301,20 +312,21 @@ app.clientside_callback(
                 return window.dash_clientside.no_update;
             }
             
+            var displayLabel = (data_store.var_label || data_store.var_key || 'Field');
             var fig_data = {
                 type: 'contour',
                 x: frame.r,
                 y: frame.z,
                 z: frame.val,
                 colorscale: "Plasma",
-                colorbar: {title: data_store.var_name},
+                colorbar: {title: displayLabel},
                 contours: {coloring: 'heatmap'},
                 ncontours: 50,
                 line: {width: 0}
             };
             
             var layout = {
-                title: data_store.var_name + " on Cross-Section at phi=" + (phi_val).toFixed(2),
+                title: displayLabel + " on Cross-Section at phi=" + (phi_val).toFixed(2),
                 xaxis: {title: "R [m]"},
                 yaxis: {title: "Z [m]", scaleanchor: "x", scaleratio: 1},
                 template: "plotly_white"
@@ -340,8 +352,15 @@ app.clientside_callback(
     """
     function(n_clicks) {
         if (n_clicks) {
-            var graph = document.getElementById('main-graph');
-            Plotly.downloadImage(graph, {
+            var graphContainer = document.getElementById('main-graph');
+            if (!graphContainer) {
+                return window.dash_clientside.no_update;
+            }
+            var plot = graphContainer.querySelector('.js-plotly-plot');
+            if (!plot) {
+                return window.dash_clientside.no_update;
+            }
+            Plotly.downloadImage(plot, {
                 format: 'png',
                 width: 1200,
                 height: 900,
@@ -407,7 +426,10 @@ def precompute_2d_slices(mode, type_2d, var_2d, filepath):
         return dash.no_update
         
     try:
-        vmec = VMECJaxProcessor(filepath)
+        coord_free = True if coord_free_bg is None else coord_free_bg
+        vmec = VMECJaxProcessor.from_file(filepath)
+        field_lookup = {opt["value"]: opt["label"] for opt in vmec.available_fields()}
+        field_label = field_lookup.get(var_2d, var_2d)
         frames = []
         # Pre-compute 21 frames (0 to 1 step 0.05)
         steps = np.linspace(0, 1, 21)
@@ -424,9 +446,7 @@ def precompute_2d_slices(mode, type_2d, var_2d, filepath):
                 "z": z.tolist(),
                 "val": val_list
             })
-            
-        vmec.close()
-        return {"frames": frames, "var_name": var_2d}
+        return {"frames": frames, "var_key": var_2d, "var_label": field_label}
     except Exception as e:
         print(f"Precompute error: {e}")
         return dash.no_update
@@ -473,17 +493,41 @@ def handle_upload(contents, filename):
     fd, path = tempfile.mkstemp(suffix=".nc")
     with os.fdopen(fd, 'wb') as f: f.write(decoded)
     
-    # Quick read to get metadata
     try:
-        vmec = VMECJaxProcessor(path)
+        vmec = VMECJaxProcessor.from_file(path)
         ns = vmec.ns
-        nfp = vmec.nfp
-        vmec.close()
-        
+        meta = {
+            "ns": ns,
+            "nfp": vmec.nfp,
+            "profiles": vmec.available_profiles(),
+            "fields": vmec.available_fields(),
+            "summary_lines": vmec.get_summary_lines(),
+        }
         marks = {0: 'Axis', ns-1: 'Edge'}
-        return path, f"Active: {filename}", {"ns": ns, "nfp": nfp}, ns-1, marks, ns-1, marks, False, ns-1, ns-1
+        return path, f"Active: {filename}", meta, ns-1, marks, ns-1, marks, False, ns-1, ns-1
     except Exception as e:
         return dash.no_update, f"Error: {str(e)}", dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update
+
+
+@app.callback(
+    Output('control-var-1d', 'data'),
+    Output('control-var-1d', 'value'),
+    Output('control-var-2d', 'data'),
+    Output('control-var-2d', 'value'),
+    Output('control-var-3d', 'data'),
+    Output('control-var-3d', 'value'),
+    Input('vmec-meta', 'data'),
+    prevent_initial_call=True
+)
+def populate_variable_options(meta):
+    if not meta:
+        raise dash.exceptions.PreventUpdate
+    profile_data = build_select_data(meta.get('profiles'))
+    field_data = build_select_data(meta.get('fields'))
+    profile_value = profile_data[0]['value'] if profile_data else dash.no_update
+    field_value = field_data[0]['value'] if field_data else dash.no_update
+    field_data_3d = [dict(opt) for opt in field_data]
+    return profile_data, profile_value, field_data, field_value, field_data_3d, field_value
 
 @app.callback(
     [Output('main-graph', 'figure'), Output('stats-grid', 'children')],
@@ -495,233 +539,299 @@ def handle_upload(contents, filename):
      Input('control-phi', 'value'), 
      Input('control-s-idx', 'value'),
      Input('control-var-3d', 'value'),
-     Input('control-s-idx-3d', 'value')],
+     Input('control-s-idx-3d', 'value'),
+     Input('control-3d-bg', 'checked')],
+    State('vmec-meta', 'data'),
     prevent_initial_call=True
 )
-def update_visualization(mode, filepath, var_1d, type_2d, var_2d, phi_val, s_idx, var_3d, s_idx_3d):
-    # If we are in 2D Cross-Section Physics mode, let the client-side callback handle the figure update
-    # We only update stats here
-    if mode == '2d' and type_2d == 'cross_section' and var_2d != 'geometry':
-        # We still need to return stats, but figure is no_update
-        # But we need to calculate stats first
-        pass 
-    
-    # Check if this is just a slider update for 2D Geometry
-    ctx_id = ctx.triggered_id
-    if ctx_id == 'control-s-idx' and mode == '2d' and type_2d == 'cross_section' and var_2d == 'geometry':
-        # Use Patch for smooth update
-        patched_fig = Patch()
-        
-        # We need to know which trace corresponds to which s_index
-        # This is tricky because we don't have the previous figure state easily accessible here
-        # But we can assume the traces are generated in a specific order or named
-        # Actually, regenerating the figure is fast for geometry, the "flash" is the issue.
-        # If we use Patch, we can't easily change data unless we know the index.
-        # Let's stick to full redraw for now but optimize if possible.
-        # Wait, the user specifically asked for smoother display.
-        # If we can't use Patch easily without state, maybe we can just return the new figure.
-        # The flash happens because the client clears the graph before rendering the new one.
-        # Dash's default behavior.
-        pass
-
-    # 默认空状态
+def update_visualization(mode, filepath, var_1d, type_2d, var_2d, phi_val, s_idx, var_3d, s_idx_3d, coord_free_bg, meta):
     empty_fig = go.Figure()
-    empty_fig.update_layout(template="plotly_white", xaxis={"visible":False}, yaxis={"visible":False})
-    empty_fig.add_annotation(text="Please upload a wout.nc file", showarrow=False, font=dict(size=20))
-    
-    if not filepath: return empty_fig, []
+    empty_fig.update_layout(template='plotly_white', xaxis={'visible': False}, yaxis={'visible': False})
+    empty_fig.add_annotation(text='Please upload a wout.nc file', showarrow=False, font=dict(size=20))
+    if not filepath:
+        return empty_fig, []
+
+    coord_free = True if coord_free_bg is None else bool(coord_free_bg)
 
     try:
-        vmec = VMECJaxProcessor(filepath)
+        vmec = VMECJaxProcessor.from_file(filepath)
         scalars = vmec.get_scalars()
-        stats_ui = dmc.SimpleGrid(cols=4, spacing="md", children=[
-            create_stat_card("Beta Total", f"{scalars['beta_total']*100:.2f}%", "mdi:percent", "red"),
-            create_stat_card("Volume", f"{scalars['volume']:.1f} m³", "mdi:cube-outline", "blue"),
-            create_stat_card("Aspect Ratio", f"{scalars['aspect']:.2f}", "mdi:ratio", "green"),
-            create_stat_card("Field on Axis", f"{scalars['b0']:.2f} T", "mdi:magnet", "orange"),
+        profile_map = {opt['value']: opt['label'] for opt in vmec.available_profiles()}
+        field_map = {opt['value']: opt['label'] for opt in vmec.available_fields()}
+
+        def fmt(value, pattern='{:.2f}', fallback='--'):
+            if value is None:
+                return fallback
+            try:
+                if np.isnan(value):
+                    return fallback
+            except TypeError:
+                pass
+            return pattern.format(value)
+
+        stats_cards = dmc.SimpleGrid(cols=4, spacing='md', children=[
+            create_stat_card('Beta Total', f"{scalars['beta_total']*100:.2f}%", 'mdi:percent', 'red'),
+            create_stat_card('Volume', f"{scalars['volume']:.1f} m3", 'mdi:cube-outline', 'blue'),
+            create_stat_card('Edge q', fmt(scalars.get('q_edge')), 'mdi:chart-line', 'teal'),
+            create_stat_card('Toroidal Current', f"{scalars['ctor']:.2f} MA", 'mdi:current-ac', 'orange'),
         ])
-        
-        # Handover for 2D Physics Sliding
+        stats_ui = stats_cards
+
         if mode == '2d' and type_2d == 'cross_section' and var_2d != 'geometry':
-            # If this was triggered by slider (phi), we return no_update for figure
-            # If triggered by variable change, the client-side callback will pick up the new store data
-            # So we can safely return no_update for figure here ALWAYS, 
-            # because the store update will trigger the client-side callback.
-            vmec.close()
             return dash.no_update, stats_ui
 
-        if mode == "summary":
-            # Create a 2x2 subplot summary
-            fig = make_subplots(
-                rows=2, cols=2,
-                subplot_titles=("Rotational Transform (iota)", "Pressure Profile", "Flux Average <B·B>", "Current Density <j·B>"),
-                vertical_spacing=0.15
+        if mode == 'summary':
+            summary_lines = vmec.get_summary_lines()
+
+            def render_summary_panels(lines):
+                if not lines:
+                    return dmc.Center(dmc.Text('Summary unavailable', c='dimmed', size='sm'))
+                panels = []
+                for line in lines:
+                    fragments = [frag.strip() for frag in line.replace('|', ',').split(',') if frag.strip()]
+                    rows = []
+                    for frag in fragments:
+                        if '=' in frag:
+                            key, value = frag.split('=', 1)
+                            rows.append(
+                                dmc.Group(
+                                    [
+                                        dmc.Kbd(key.strip(), style={"minWidth": 70}),
+                                        dmc.Text(value.strip(), fw=600)
+                                    ],
+                                    gap="xs",
+                                    align="center"
+                                )
+                            )
+                        else:
+                            rows.append(dmc.Text(frag, fw=600))
+                    panels.append(
+                        dmc.Paper(
+                            dmc.Stack(rows, gap=4),
+                            withBorder=True,
+                            radius="sm",
+                            shadow="xs",
+                            p="sm"
+                        )
+                    )
+                return dmc.SimpleGrid(cols=2, spacing="sm", children=panels)
+
+            summary_block = dmc.Card(
+                withBorder=True,
+                radius='md',
+                shadow='xs',
+                children=[
+                    dmc.Group(
+                        [
+                            dmc.Text('Equilibrium snapshot', fw=600, size='sm'),
+                            dmc.Badge('VMEC', color='indigo', variant='light')
+                        ],
+                        justify='space-between',
+                        mb='sm'
+                    ),
+                    render_summary_panels(summary_lines)
+                ]
             )
-            
-            s, iota = vmec.get_1d_data('iota')
-            s, pres = vmec.get_1d_data('pressure')
-            s, bdotb = vmec.get_1d_data('<B.B>')
-            s, jcuru = vmec.get_1d_data('<jcuru>') # Approximation for parallel current
-            
-            fig.add_trace(go.Scatter(x=s, y=iota, name="iota", line=dict(color="#4c6ef5", width=3)), row=1, col=1)
-            fig.add_trace(go.Scatter(x=s, y=pres, name="pressure", line=dict(color="#fa5252", width=3), fill='tozeroy'), row=1, col=2)
-            fig.add_trace(go.Scatter(x=s, y=bdotb, name="<B·B>", line=dict(color="#12b886", width=3)), row=2, col=1)
-            fig.add_trace(go.Scatter(x=s, y=jcuru, name="<j^u>", line=dict(color="#be4bdb", width=3)), row=2, col=2)
-            
+            stats_ui = dmc.Stack([stats_cards, summary_block], gap='sm')
+
+            fig = make_subplots(
+                rows=2, cols=3,
+                subplot_titles=(
+                    'Rotational Transform (iota)',
+                    'Safety Factor (q)',
+                    'Pressure Profile',
+                    'dP/ds',
+                    'Volume Enclosed (Vp)',
+                    'Flux Avg <B·B>'
+                ),
+                vertical_spacing=0.15,
+                horizontal_spacing=0.08
+            )
+            s_iota, iota = vmec.get_1d_data('iotaf')
+            s_q, q_profile = vmec.get_1d_data('q')
+            s_p, pres = vmec.get_1d_data('presf')
+            s_dp, dpds = vmec.get_1d_data('dpds')
+            s_vp, vp = vmec.get_1d_data('vp')
+            s_b, bdotb = vmec.get_1d_data('bdotb')
+
+            fig.add_trace(go.Scatter(x=s_iota, y=iota, name='iota', line=dict(color='#4c6ef5', width=3)), row=1, col=1)
+            fig.add_trace(go.Scatter(x=s_q, y=q_profile, name='q', line=dict(color='#fd7e14', width=3)), row=1, col=2)
+            fig.add_trace(go.Scatter(x=s_p, y=pres, name='pressure', line=dict(color='#fa5252', width=3)), row=1, col=3)
+            fig.add_trace(go.Scatter(x=s_dp, y=dpds, name='dP/ds', line=dict(color='#12b886', width=3)), row=2, col=1)
+            fig.add_trace(go.Scatter(x=s_vp, y=vp, name='Vp', line=dict(color='#7950f2', width=3)), row=2, col=2)
+            fig.add_trace(go.Scatter(x=s_b, y=bdotb, name='<B·B>', line=dict(color='#0ca678', width=3)), row=2, col=3)
+
             fig.update_layout(
-                title_text="Equilibrium Summary", 
-                template="plotly_white", 
-                height=800,
+                title_text='Equilibrium Summary',
+                template='plotly_white',
+                height=900,
                 showlegend=False
             )
-            fig.update_xaxes(title_text="Normalized Flux (s)")
-            
-        elif mode == "1d":
-            var = var_1d if var_1d else 'iota'
+            for axis_key in fig.layout:
+                if axis_key.startswith('xaxis'):
+                    fig.layout[axis_key].title = 'Normalized Flux (s)'
+
+        elif mode == '1d':
+            var = var_1d or 'iotaf'
+            label = profile_map.get(var, var)
             s, y = vmec.get_1d_data(var)
             fig = go.Figure()
-            fig.add_trace(go.Scatter(x=s, y=y, mode='lines', fill='tozeroy', line_color="#4c6ef5"))
-            fig.update_layout(title=f"Profile: {var}", xaxis_title="s", yaxis_title=var, template="plotly_white")
-            
-        elif mode == "2d":
+            fig.add_trace(go.Scatter(x=s, y=y, mode='lines', line=dict(color='#4c6ef5', width=3)))
+            fig.update_layout(title=f'Profile: {label}', xaxis_title='s', yaxis_title=label, template='plotly_white')
+
+        elif mode == '2d':
             phi_frac = phi_val if phi_val is not None else 0.0
             s_index = int(s_idx) if s_idx is not None else -1
-            # Safety clamp for index
             s_index = max(0, min(s_index, vmec.ns - 1))
-            
+            field_label = field_map.get(var_2d, var_2d)
             fig = go.Figure()
-            
-            if type_2d == "cross_section":
-                # R-Z Plot
+
+            if type_2d == 'cross_section':
                 if var_2d == 'geometry':
-                    # Plot multiple flux surfaces as lines
                     surfaces = np.linspace(0, vmec.ns-1, 15, dtype=int)
-                    # Ensure s_index is included and valid
-                    if s_index not in surfaces: surfaces = np.append(surfaces, s_index)
+                    if s_index not in surfaces:
+                        surfaces = np.append(surfaces, s_index)
                     surfaces = np.sort(surfaces)
-                    
-                    # Get data for all surfaces
-                    # We use a high resolution for smooth lines
-                    r_grid, z_grid, _ = vmec.get_cross_section_data(phi_frac * 2 * np.pi / vmec.nfp, 'geometry', res_s=vmec.ns, res_u=128)
-                    
-                    # Plot selected surfaces
+                    r_grid, z_grid, _ = vmec.get_cross_section_data(
+                        phi_frac * 2 * np.pi / vmec.nfp, 'geometry', res_s=vmec.ns, res_u=160
+                    )
                     for s_i in surfaces:
-                        # Safety check
-                        if s_i >= len(r_grid): continue
-                        
-                        # r_grid is (ns, nu)
-                        # We need to close the loop
+                        if s_i >= len(r_grid):
+                            continue
                         r_line = np.append(r_grid[s_i], r_grid[s_i][0])
                         z_line = np.append(z_grid[s_i], z_grid[s_i][0])
-                        
-                        color = "red" if s_i == s_index else "rgba(0,0,0,0.3)"
+                        color = 'red' if s_i == s_index else 'rgba(0,0,0,0.3)'
                         width = 3 if s_i == s_index else 1
-                        
                         fig.add_trace(go.Scatter(
-                            x=r_line, y=z_line, mode='lines', 
+                            x=r_line, y=z_line, mode='lines',
                             line=dict(color=color, width=width),
-                            name=f"s={s_i}",
-                            hoverinfo='skip' # Improve performance
+                            name=f's={s_i}',
+                            hoverinfo='skip'
                         ))
-                    
                     fig.update_layout(
-                        title=f"Flux Surfaces at phi={phi_frac:.2f}", 
-                        xaxis_title="R [m]", 
-                        yaxis_title="Z [m]",
-                        uirevision=f"{mode}-{type_2d}-{var_2d}-{phi_val}" # Preserve zoom/state on slider change
+                        title=f'Flux surfaces at phi={phi_frac:.2f}',
+                        xaxis_title='R [m]',
+                        yaxis_title='Z [m]',
+                        uirevision=f"{mode}-{type_2d}-{var_2d}-{phi_val}"
                     )
-                    
                 else:
-                    # Plot heatmap of variable using interpolation
-                    # Use the new masked grid method for correct shape
-                    r_lin, z_lin, val_grid = vmec.get_cross_section_grid(phi_frac * 2 * np.pi / vmec.nfp, var_2d, res_grid=200)
-                    
+                    r_lin, z_lin, val_grid = vmec.get_cross_section_grid(
+                        phi_frac * 2 * np.pi / vmec.nfp, var_2d, res_grid=220
+                    )
                     fig.add_trace(go.Contour(
                         x=r_lin, y=z_lin, z=val_grid,
-                        colorscale="Plasma",
-                        colorbar=dict(title=var_2d),
+                        colorscale='Plasma',
+                        colorbar=dict(title=field_label),
                         contours=dict(coloring='heatmap'),
                         ncontours=50,
-                        line_width=0 # No contour lines for heatmap look
+                        line_width=0
                     ))
-                    fig.update_layout(title=f"{var_2d} on Cross-Section at phi={phi_frac:.2f}", xaxis_title="R [m]", yaxis_title="Z [m]")
+                    fig.update_layout(
+                        title=f"{field_label} on cross-section at phi={phi_frac:.2f}",
+                        xaxis_title='R [m]',
+                        yaxis_title='Z [m]'
+                    )
+                fig.update_yaxes(scaleanchor='x', scaleratio=1)
 
-                fig.update_yaxes(scaleanchor="x", scaleratio=1)
-                
-            elif type_2d == "flux_surface":
-                # Theta-Zeta Plot
-                # Increase resolution as requested
+            elif type_2d == 'flux_surface':
                 theta, zeta, val = vmec.get_flux_surface_data(s_index, var_2d, res_u=128, res_v=128)
-                
                 if theta is not None:
-                    # Use Contour instead of Heatmap
-                    # Axes: Zeta (0 to 2pi/nfp), Theta (0 to 2pi)
                     fig.add_trace(go.Contour(
-                        x=zeta, 
-                        y=theta, 
+                        x=zeta,
+                        y=theta,
                         z=val,
-                        colorscale="Viridis",
-                        colorbar=dict(title=var_2d),
+                        colorscale='Viridis',
+                        colorbar=dict(title=field_label),
                         contours=dict(coloring='fill', showlines=True),
                         line_width=0.5,
                         ncontours=20
                     ))
                     fig.update_layout(
-                        title=f"{var_2d} on Flux Surface s={s_index/(vmec.ns-1):.2f}",
-                        xaxis_title="Zeta (Toroidal) [rad]",
-                        yaxis_title="Theta (Poloidal) [rad]",
+                        title=f"{field_label} on flux surface s={s_index/(vmec.ns-1):.2f}",
+                        xaxis_title='Zeta (toroidal) [rad]',
+                        yaxis_title='Theta (poloidal) [rad]',
                         xaxis=dict(range=[0, 2*np.pi/vmec.nfp]),
-                        yaxis=dict(range=[0, 2*np.pi]) # Removed scaleanchor to allow stretching
+                        yaxis=dict(range=[0, 2*np.pi])
                     )
-            
-        elif mode == "3d":
+
+        elif mode == '3d':
             s_val = int(s_idx_3d) if s_idx_3d is not None else -1
-            # Safety clamp
             s_val = max(0, min(s_val, vmec.ns - 1))
-            
-            v_name = var_3d if var_3d else '|B|'
-            
+            v_name = var_3d or 'modB'
+            field_label = field_map.get(v_name, v_name)
             fig = go.Figure()
-            
-            x, y, z, val = vmec.compute_3d_surface(s_idx=s_val, var_name=v_name, resolution=100)
-            
-            # If geometry only, use a single color
+            x, y, z, val = vmec.compute_3d_surface(s_idx=s_val, var_name=v_name, resolution=110)
             if v_name == 'geometry':
                 surface_color = np.full_like(z, 0.5)
                 colorscale = 'Greys'
                 show_scale = False
             else:
                 surface_color = val
-                colorscale = 'Plasma'
+                colorscale = 'Jet'
                 show_scale = True
-
             fig.add_trace(go.Surface(
-                x=x, y=y, z=z, 
-                surfacecolor=surface_color, 
+                x=x, y=y, z=z,
+                surfacecolor=surface_color,
                 colorscale=colorscale,
-                colorbar=dict(title=v_name, len=0.5) if show_scale else None,
+                colorbar=dict(title=field_label, len=0.5) if show_scale else None,
                 lighting=dict(ambient=0.6, roughness=0.1, specular=0.2)
             ))
-            
-            title_txt = f"Flux Surface s={s_val/(vmec.ns-1):.2f}"
+            title_txt = f"Flux surface s={s_val/(vmec.ns-1):.2f}"
             if v_name != 'geometry':
-                title_txt += f" colored by {v_name}"
-                
+                title_txt += f" colored by {field_label}"
+            if coord_free:
+                def hidden_axis():
+                    return dict(
+                        visible=False,
+                        showgrid=False,
+                        zeroline=False,
+                        showbackground=False,
+                        showticklabels=False
+                    )
+
+                scene_axes = dict(
+                    xaxis=hidden_axis(),
+                    yaxis=hidden_axis(),
+                    zaxis=hidden_axis(),
+                    bgcolor='rgba(0,0,0,0)',
+                    aspectmode='data'
+                )
+            else:
+                def axis_with(title):
+                    return dict(
+                        title=title,
+                        visible=True,
+                        showgrid=True,
+                        zeroline=False,
+                        showbackground=True,
+                        backgroundcolor='rgba(245,245,245,1)',
+                        showticklabels=True
+                    )
+
+                scene_axes = dict(
+                    xaxis=axis_with('X'),
+                    yaxis=axis_with('Y'),
+                    zaxis=axis_with('Z'),
+                    bgcolor='rgba(248,249,252,1)',
+                    aspectmode='data'
+                )
+
             fig.update_layout(
                 title=title_txt,
-                scene=dict(xaxis_title="X", yaxis_title="Y", zaxis_title="Z", aspectmode='data'),
+                scene=scene_axes,
                 margin=dict(l=0, r=0, t=40, b=0),
-                uirevision=f"{mode}-{var_3d}" # Keep camera angle when changing s_idx
+                uirevision=f"{mode}-{v_name}"
             )
-        
-        vmec.close()
+        else:
+            fig = empty_fig
+
         return fig, stats_ui
 
     except Exception as e:
         import traceback
         traceback.print_exc()
         err_fig = go.Figure()
-        err_fig.add_annotation(text=f"Error: {str(e)}", showarrow=False, font=dict(color="red", size=16))
+        err_fig.add_annotation(text=f"Error: {str(e)}", showarrow=False, font=dict(color='red', size=16))
         return err_fig, []
 
 app.clientside_callback(
@@ -756,10 +866,10 @@ app.clientside_callback(
 app.clientside_callback(
     """
     function(data, var_name) {
-        if (data && data.var_name === var_name) {
+        if (data && data.var_key === var_name) {
             return [
                 false,
-                'Rendered: ' + var_name,
+                'Rendered: ' + (data.var_label || var_name),
                 'green',
                 {'height': '85vh', 'opacity': 1, 'transition': 'opacity 0.5s'}
             ];
