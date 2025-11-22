@@ -554,7 +554,8 @@ app.layout = dmc.MantineProvider(
                                     style={"position": "absolute", "top": 12, "left": 12, "zIndex": 10}
                                 ),
                                 dcc.Loading(
-                                    custom_spinner=dmc.Loader(color="cyan", size="xl", type="bars"),
+                                    type="default",
+                                    color="cyan",
                                     children=dcc.Graph(
                                         id="main-graph",
                                         style={"height": "calc(100vh - 204px)", "width": "100%"},
