@@ -10,14 +10,13 @@ import os
 import numpy as np
 import math
 
-# 引入您的后端
 try:
     from vmec_jax import VMECJaxProcessor
 except ImportError:
     print("Warning: vmec_jax module not found. Ensure the file is in the directory.")
     VMECJaxProcessor = None
 
-# 设置 React 版本 (DMC 0.14+ 必需)
+# 设置 React 版本 
 _dash_renderer._set_react_version("18.2.0")
 
 app = dash.Dash(
@@ -443,7 +442,8 @@ app.layout = dmc.MantineProvider(
                         children=[
                             dmc.Group([
                                 dmc.ThemeIcon(
-                                    get_icon("mdi:atom-variant"),
+                                    # get_icon("mdi:atom-variant"),
+                                    get_icon("picon:infinity"),
                                     variant="gradient",
                                     gradient={"from": "cyan", "to": "indigo"},
                                     size="lg",
@@ -458,6 +458,7 @@ app.layout = dmc.MantineProvider(
                                 ], gap=0)
                             ], gap="md"),
                             dmc.Group([
+                                dmc.Text(id="header-filename", children="No File Loaded", size="sm", c="dimmed", fw=500),
                                 dmc.Switch(
                                     id="toggle-theme",
                                     label="Dark Mode",
@@ -465,10 +466,10 @@ app.layout = dmc.MantineProvider(
                                     color="cyan",
                                     size="md"
                                 ),
-                                dmc.Text(id="header-filename", children="No File Loaded", size="sm", c="dimmed", fw=500),
-                                dmc.ActionIcon(get_icon("mdi:github"), variant="subtle", color="gray"),
-                                dmc.ActionIcon(get_icon("mdi:bell"), variant="subtle", color="gray"),
-                                dmc.Avatar(radius="xl", color="cyan", children="VM")
+                                
+                                # dmc.ActionIcon(get_icon("mdi:github"), variant="subtle", color="gray"),
+                                # dmc.ActionIcon(get_icon("mdi:bell"), variant="subtle", color="gray"),
+                                # dmc.Avatar(radius="xl", color="cyan", children="VM")
                             ], gap="xs")
                         ]
                     )
