@@ -266,8 +266,11 @@ class VMECJaxProcessor:
             scalars["iota_edge"] = float(iota[-1])
             scalars["q_axis"] = float(1.0 / (iota[0] + EPS))
             scalars["q_edge"] = float(1.0 / (iota[-1] + EPS))
-            shear = jnp.gradient(iota, self._s_grid)
-            scalars["shear_edge"] = float(shear[-1])
+            try:
+                shear = jnp.gradient(iota, self._s_grid)
+            except NotImplementedError:
+                shear = np.gradient(np.asarray(iota), np.asarray(self._s_grid))
+            scalars["shear_edge"] = float(np.asarray(shear)[-1])
         if pres is not None:
             scalars["pressure_axis"] = float(pres[0])
             scalars["pressure_edge"] = float(pres[-1])

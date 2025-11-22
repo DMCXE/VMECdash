@@ -44,17 +44,6 @@ python app.py
 
 Dash defaults to `http://127.0.0.1:8050/`. The layout is responsive, so you can resize the browser to focus on plots or the control sidebar.
 
----
-
-## Static Demo Export
-
-Need a readthedocs-style preview without running a server? The helper builds a documentation page with summary cards plus an embedded Plotly figure for any sample `wout_*.nc` equilibrium:
-
-```bash
-python export_static_demo.py --target test_app.py --sample wout_PO.nc --output docs/index.html --overwrite
-```
-
-Publish the resulting `docs/index.html` (e.g., via GitHub Pages) to showcase the styling and a representative plot without hosting a live Dash backend. Update the sample file or `--view` flag to refresh the static preview whenever the app layout changes.
 
 ---
 
@@ -78,9 +67,9 @@ For heavy 2‑D physics overlays, a pre-computation step runs on the server whil
 | Path            | Description                                                      |
 | --------------- | ---------------------------------------------------------------- |
 | `app.py`        | Dash layout, callbacks, and UI logic.                            |
+| `test_app.py`   | Dash layout, callbacks, and UI logic. Better than upper                          |
 | `vmec_jax.py`   | JAX-powered data processor for VMEC equilibria.                  |
 | `requirements.txt` | Python dependencies.                                          |
-| `ref/VMECplot.m` | MATLAB reference implementation for feature parity (read-only). |
 | `wout_PO.nc`    | Example VMEC equilibrium (use your own files for new cases).     |
 
 ---
