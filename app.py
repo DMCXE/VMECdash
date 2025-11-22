@@ -182,7 +182,8 @@ controls_3d = html.Div(
 # Sidebar
 sidebar_content = dmc.Stack([
     dmc.Group([
-        dmc.ThemeIcon(get_icon("mdi:atom-variant"), size="lg", radius="xl", color="indigo"),
+        # dmc.ThemeIcon(get_icon("mdi:atom-variant"), size="lg", radius="xl", color="indigo"),
+        dmc.ThemeIcon(get_icon("picon:infinity"), size="lg", radius="xl", color="indigo"),
         dmc.Text("VMEC Viewer", size="xl", fw=700),
     ]),
     dmc.Divider(),
@@ -426,7 +427,7 @@ def precompute_2d_slices(mode, type_2d, var_2d, filepath):
         return dash.no_update
         
     try:
-        coord_free = True if coord_free_bg is None else coord_free_bg
+        # coord_free = True if coord_free_bg is None else coord_free_bg
         vmec = VMECJaxProcessor.from_file(filepath)
         field_lookup = {opt["value"]: opt["label"] for opt in vmec.available_fields()}
         field_label = field_lookup.get(var_2d, var_2d)
