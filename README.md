@@ -48,13 +48,13 @@ Dash defaults to `http://127.0.0.1:8050/`. The layout is responsive, so you can 
 
 ## Static Demo Export
 
-Need a readthedocs-style preview without running a server? Use the new helper to render a fully-populated HTML snapshot (requires Dash ≥ 2.16 and a sample VMEC file):
+Need a readthedocs-style preview without running a server? The helper builds a documentation page with summary cards plus an embedded Plotly figure for any sample `wout_*.nc` equilibrium:
 
 ```bash
 python export_static_demo.py --target test_app.py --sample wout_PO.nc --output docs/index.html --overwrite
 ```
 
-Serve the generated `docs/index.html` through GitHub Pages (set Pages to the `docs/` folder) to showcase the UI with a single equilibrium. The script reuses the existing `update_visualization` callback, so any layout tweaks automatically propagate to the exported demo.
+Publish the resulting `docs/index.html` (e.g., via GitHub Pages) to showcase the styling and a representative plot without hosting a live Dash backend. Update the sample file or `--view` flag to refresh the static preview whenever the app layout changes.
 
 ---
 
