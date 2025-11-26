@@ -409,7 +409,56 @@ class VMECJaxProcessor:
         )
         return np.asarray(x), np.asarray(y), np.asarray(z), np.asarray(val)
 
-
+    # ------------------------------------------------------------------
+    # Field Line Tracing
+    # ------------------------------------------------------------------
+    def compute_field_line_properties(self, s_idx: int, alpha_points: int = 256, zeta_points: int = 256, 
+                                      n_transits: int = 0, alpha0: float = 0.0, single_line: bool = False):
+        """
+        Compute |B| in (alpha, zeta) coordinates.
+        If single_line is True, computes for a single field line over n_transits.
+        Otherwise computes for a grid of alpha values.
+        """
+        idx = self._sanitize_s(s_idx)
+        
+        # Extract parameters for this flux surface
+        lmns = self._field_arrays.get('lmns')[idx]
+        bmnc = self._field_arrays.get('bmnc')[idx]
+        iota = self._profile_arrays.get('iotaf')[idx]
+        
+        # Determine which xm/xn arrays to use based on coefficient size
+        xm_l = self.xm if lmns.shape[-1] == self.xm.shape[0] else self.xm_nyq
+        xn_l = self.xn if lmns.shape[-1] == self.xn.shape[0] else self.xn_nyq
+        
+        xm_b = self.xm if bmnc.shape[-1] == self.xm.shape[0] else self.xm_nyq
+        xn_b = self.xn if bmnc.shape[-1] == self.xn.shape[0] else self.xn_nyq
+        
+        params = {
+            'nfp': self.nfp,
+            'iota': iota,
+            'xm_b': xm_b,
+            'xn_b': xn_b,
+            'xm_lambda': xm_l,
+            'xn_lambda': xn_l,
+            'bmnc': bmnc,
+            'lmns': lmns,
+        }
+        
+        zeta_max = 2.0 * jnp.pi / self.nfp
+        zeta_grid = jnp.linspace(0.0, zeta_max, zeta_points, endpoint=False)
+        
+        if single_line:
+            # Compute shifted alphas for single line trace
+            # Ensure n_transits is at least 1
+            n_transits = max(1, n_transits)
+            alpha_segments = compute_shifted_alphas(alpha0, n_transits, params)
+            B_data = compute_all_grid(alpha_segments, zeta_grid, params)
+            return np.asarray(zeta_grid), np.asarray(alpha_segments), np.asarray(B_data)
+        else:
+            # Full grid
+            alpha_grid = jnp.linspace(0.0, 2.0 * jnp.pi, alpha_points, endpoint=False)
+            B_data = compute_all_grid(alpha_grid, zeta_grid, params)
+            return np.asarray(alpha_grid), np.asarray(zeta_grid), np.asarray(B_data)
 # ----------------------------------------------------------------------
 # JAX kernels
 # ----------------------------------------------------------------------
@@ -455,3 +504,135 @@ def _jit_surface_3d(rmnc, zmns, coeffs, xm, xn, xm_var, xn_var, theta, phi, mode
     trig = jnp.cos(angle_var) if mode == "cos" else jnp.sin(angle_var)
     val = jnp.sum(coeffs[:, None, None] * trig, axis=0)
     return x_val, y_val, z_val, val
+
+
+# ----------------------------------------------------------------------
+# Field Line Tracing Kernels (from plot_az_jax.py)
+# ----------------------------------------------------------------------
+
+@jax.jit
+def eval_Lambda(theta, zeta, xm, xn, lmns):
+    """
+    Evaluate Lambda(theta, zeta) = sum lmns * sin(xm*theta - xn*zeta).
+    """
+    arg = xm * theta - xn * zeta
+    return jnp.sum(lmns * jnp.sin(arg))
+
+
+@jax.jit
+def eval_B(theta, zeta, xm, xn, bmnc):
+    """
+    Evaluate |B|(theta, zeta) = sum bmnc * cos(xm*theta - xn*zeta).
+    """
+    arg = xm * theta - xn * zeta
+    return jnp.sum(bmnc * jnp.cos(arg))
+
+
+@jax.jit
+def residual_fn(theta, alpha, zeta, iota, xm_l, xn_l, lmns):
+    """
+    Implicit equation F(theta) = theta + Lambda(theta, zeta) - iota*zeta - alpha = 0.
+    """
+    lam = eval_Lambda(theta, zeta, xm_l, xn_l, lmns)
+    return theta + lam - iota * zeta - alpha
+
+
+@partial(jax.jit, static_argnames=['max_iter'])
+def newton_solver(alpha, zeta, theta_init, iota, xm_l, xn_l, lmns, tol=1e-12, max_iter=100):
+    """
+    Solve F(theta) = 0 for theta using Newton's method with AD.
+    """
+    
+    def cond_fun(state):
+        _, diff, count = state
+        return (diff > tol) & (count < max_iter)
+
+    def body_fun(state):
+        theta, _, count = state
+        
+        # Calculate F and F' (dF/dtheta) using auto-diff
+        # argnums=0 means differentiate w.r.t theta
+        F, dF_dtheta = jax.value_and_grad(residual_fn, argnums=0)(
+            theta, alpha, zeta, iota, xm_l, xn_l, lmns
+        )
+        
+        # Newton step
+        step = -F / dF_dtheta
+        theta_new = theta + step
+        
+        # Note: No wrapping of theta (theta % 2pi) to allow continuous evolution
+        
+        return theta_new, jnp.abs(step), count + 1
+
+    # Initial state: (theta, diff, count)
+    # Set initial diff to be > tol so loop starts
+    init_state = (theta_init, 1.0, 0)
+    
+    final_state = jax.lax.while_loop(cond_fun, body_fun, init_state)
+    return final_state[0]
+
+
+@jax.jit
+def compute_field_line_scan(alpha, zeta_grid, params):
+    """
+    Compute |B| along a single field line (fixed alpha) by scanning over zeta.
+    Uses the previous theta solution as the initial guess for the next point.
+    """
+    iota = params['iota']
+    xm_l = params['xm_lambda']
+    xn_l = params['xn_lambda']
+    lmns = params['lmns']
+    xm_b = params['xm_b']
+    xn_b = params['xn_b']
+    bmnc = params['bmnc']
+    
+    # Initial guess for the very first point (zeta = zeta_grid[0])
+    # Straight-field-line approximation: theta = alpha + iota * zeta
+    theta_init = alpha + iota * zeta_grid[0]
+    
+    def scan_body(theta_prev, zeta):
+        # Use theta_prev as the initial guess for the Newton solver
+        theta_sol = newton_solver(
+            alpha, zeta, theta_prev, 
+            iota, xm_l, xn_l, lmns, 
+            tol=1e-12, max_iter=100
+        )
+        
+        # Compute |B| at the solution
+        B_val = eval_B(theta_sol, zeta, xm_b, xn_b, bmnc)
+        
+        # Pass theta_sol as the carry to the next step
+        return theta_sol, B_val
+
+    # jax.lax.scan returns (final_carry, stacked_outputs)
+    _, B_line = jax.lax.scan(scan_body, theta_init, zeta_grid)
+    
+    return B_line
+
+
+@jax.jit
+def compute_all_grid(alpha_grid, zeta_grid, params):
+    """
+    Vectorize the field line computation over all alpha values.
+    """
+    # vmap over the first argument (alpha), broadcast others
+    return jax.vmap(compute_field_line_scan, in_axes=(0, None, None))(
+        alpha_grid, zeta_grid, params
+    )
+
+
+@partial(jax.jit, static_argnames=['n_transits'])
+def compute_shifted_alphas(alpha0, n_transits, params):
+    """
+    Compute the sequence of alpha values for a single field line
+    mapped back to the first period:
+    alpha_k = (alpha0 + k * iota * 2pi/nfp) % 2pi
+    """
+    iota = params['iota']
+    nfp = params['nfp']
+    k_vals = jnp.arange(n_transits)
+    
+    # Shift
+    delta_alpha = iota * (2.0 * jnp.pi / nfp)
+    alphas = (alpha0 + k_vals * delta_alpha) % (2.0 * jnp.pi)
+    return alphas
