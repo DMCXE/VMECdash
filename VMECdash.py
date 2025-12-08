@@ -68,6 +68,7 @@ app.layout = dmc.MantineProvider(
         dcc.Store(id='vmec-meta'),
         dcc.Store(id='current-view', data='overview'),
         dcc.Store(id='store-2d-data'),
+        dcc.Store(id='resize-ping'),
         dcc.Download(id='download-report'),
 
         dmc.AppShell(
@@ -743,6 +744,24 @@ app.clientside_callback(
     Output('main-graph', 'style', allow_duplicate=True),
     Input('store-2d-data', 'data'),
     State('ctrl-2d-var', 'value'),
+    prevent_initial_call=True
+)
+
+# Force a resize after a file is loaded so Plotly fills the container
+app.clientside_callback(
+    """
+    function(filepath) {
+        if (!filepath) {
+            return window.dash_clientside.no_update;
+        }
+        setTimeout(function() {
+            window.dispatchEvent(new Event('resize'));
+        }, 50);
+        return Date.now();
+    }
+    """,
+    Output('resize-ping', 'data'),
+    Input('stored-filepath', 'data'),
     prevent_initial_call=True
 )
 
