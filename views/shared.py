@@ -55,7 +55,7 @@ def base_stat_cards(scalars: dict[str, Any]) -> dmc.SimpleGrid:
         children=[
             create_stat_card("Beta Total", f"{beta*100:.2f}%", "mdi:percent", "red"),
             create_stat_card("Volume", f"{vol:.2f} m³", "mdi:cube-outline", "blue"),
-            create_stat_card("Aspect Ratio", ar_str, "mdi:ratio", "orange"),
+            create_stat_card("Aspect Ratio", ar_str, "lucide:torus", "orange"),
             create_stat_card("Toroidal Current", f"{curr:.2f} A", "mdi:current-ac", "teal"),
         ],
     )
