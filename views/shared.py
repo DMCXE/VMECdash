@@ -32,6 +32,7 @@ def build_theme(dark_mode: bool, reset_seed: int) -> PlotTheme:
 def make_empty_figure(theme: PlotTheme, message: str) -> go.Figure:
     fig = go.Figure()
     fig.update_layout(
+        autosize=True,
         template=theme.fig_template,
         paper_bgcolor=theme.paper_bg,
         plot_bgcolor=theme.plot_bg,

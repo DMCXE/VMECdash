@@ -191,14 +191,14 @@ app.layout = dmc.MantineProvider(
                                     dmc.Badge("Interactive View", color="dark", radius="sm"),
                                     style={"position": "absolute", "top": 12, "left": 12, "zIndex": 10}
                                 ),
-                        dcc.Loading(
-                            type="default",
-                            color="cyan",
-                            children=dcc.Graph(
-                                id="main-graph",
-                                figure=make_empty_figure(build_theme(True, 0), "Please load a .nc file"),
-                                        style={"height": "calc(100vh - 204px)", "width": "100%"},
-                                        config={"displayModeBar": True, "displaylogo": False, "scrollZoom": True}
+                                dcc.Loading(
+                                    type="default",
+                                    color="cyan",
+                                    children=dcc.Graph(
+                                        id="main-graph",
+                                        figure=make_empty_figure(build_theme(True, 0), "Please load a .nc file"),
+                                        style={"height": "100%", "width": "100%"},
+                                        config={"displayModeBar": True, "displaylogo": False, "scrollZoom": True, "responsive": True}
                                     )
                                 ),
                                 # Drag-and-drop overlay for initial load

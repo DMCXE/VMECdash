@@ -319,7 +319,7 @@ class VmecPostProcessor:
             scalars["iota_edge"] = float(iota[-1])
             scalars["q_axis"] = float(1.0 / (iota[0] + EPS))
             scalars["q_edge"] = float(1.0 / (iota[-1] + EPS))
-            shear = jnp.gradient(iota, self._s_grid)
+            shear = np.gradient(iota, self._s_grid) # jnp.gradient causes issues here on windows
             scalars["shear_edge"] = float(jnp.asarray(shear)[-1])
         if pres is not None:
             scalars["pressure_axis"] = float(pres[0])
