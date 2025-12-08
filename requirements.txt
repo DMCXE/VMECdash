@@ -7,6 +7,5 @@ scipy>=1.11.0
 matplotlib>=3.8.0
 xarray>=2024.1.0
 netCDF4>=1.6.5
-pandas>=2.2.0
 jax>=0.4.26
 jaxlib>=0.4.26

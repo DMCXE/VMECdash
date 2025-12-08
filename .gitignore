@@ -1,8 +1,4 @@
-/ref/
-/oldversion/
 /__pycache__/
-playground.py
-export_static_demo.py
-__pycache__/app.cpython-311.pyc
-__pycache__/test_app.cpython-311.pyc
-__pycache__/vmec_jax.cpython-311.pyc
+/ui/__pycache__/
+/views/__pycache__/
+.DS_Store

@@ -1,7 +1,11 @@
+from __future__ import annotations
+
 import math
 import numbers
 import os
+from dataclasses import dataclass
 from functools import partial
+from typing import Callable, Mapping
 
 import jax
 import jax.numpy as jnp
@@ -16,71 +20,143 @@ jax.config.update("jax_enable_x64", True)
 EPS = 1e-12
 
 
-PROFILE_DEFS = {
-    "iotaf": {"label": "Rotational Transform (iota)", "source": "iotaf", "category": "Core"},
-    "q": {
-        "label": "Safety Factor (q)",
-        "source": "iotaf",
-        "transform": lambda arr: 1.0 / (arr + EPS),
-        "category": "Core",
-    },
-    "presf": {"label": "Pressure", "source": "presf", "category": "Pressure"},
-    "betapol": {"label": "beta_pol", "source": "betapol", "category": "Pressure"},
-    "betator": {"label": "beta_tor", "source": "betator", "category": "Pressure"},
-    "beta_vol": {"label": "beta_vol", "source": "beta_vol", "category": "Pressure"},
-    "phi": {"label": "Toroidal Flux", "source": "phi", "category": "Flux"},
-    "phip": {"label": "dPhi/ds", "source": "phipf", "category": "Flux"},
-    "vp": {"label": "Enclosed Volume", "source": "vp", "category": "Flux"},
-    "overr": {"label": "1/R", "source": "over_r", "category": "Geometry"},
-    "buco": {"label": "<B^u>", "source": "buco", "category": "Magnetic"},
-    "bvco": {"label": "<B^v>", "source": "bvco", "category": "Magnetic"},
-    "jcuru": {"label": "<j^u>", "source": "jcuru", "category": "Current"},
-    "jcurv": {"label": "<j^v>", "source": "jcurv", "category": "Current"},
-    "bdotb": {"label": "<B·B>", "source": "bdotb", "category": "Magnetic"},
-    "DMerc": {"label": "Mercier D", "source": "DMerc", "category": "Stability"},
-    "DShear": {"label": "Shear D", "source": "DShear", "category": "Stability"},
-    "DWell": {"label": "Well D", "source": "DWell", "category": "Stability"},
-    "DCurr": {"label": "Current D", "source": "DCurr", "category": "Stability"},
-    "DGeod": {"label": "Geodesic D", "source": "DGeod", "category": "Stability"},
-    "jdotb": {"label": "<J·B>", "source": "jdotb", "category": "Current"},
-    "bdotgradv": {"label": "<B·∇v>", "source": "bdotgradv", "category": "Magnetic"},
-    "specw": {"label": "Spectral Width", "source": "specw", "category": "Diagnostics"},
-    "dpds": {
-        "label": "dP/ds",
-        "source": "presf",
-        "transform": lambda arr, s=None: jnp.gradient(arr, s) if s is not None else arr,
-        "requires_s": True,
-        "category": "Pressure",
-    },
-}
+# ---------------------------------------------------------------------------
+# Definition helpers
+# ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class ProfileSpec:
+    """Definition of a flux-surface-averaged profile."""
+
+    key: str
+    label: str
+    source: str
+    category: str = "Profiles"
+    transform: Callable | None = None
+    requires_s: bool = False
+
+    def option(self) -> dict:
+        return {"value": self.key, "label": self.label, "category": self.category}
 
 
-FIELD_DEFS = {
-    "geometry": {"label": "Geometry Only", "category": "Geometry"},
-    "modB": {"label": "|B| (Mod B)", "source": "bmnc", "category": "Magnetic"},
-    "jacobian": {"label": "sqrt(g)", "source": "gmnc", "category": "Metric"},
-    "lambda": {"label": "Lambda", "source": "lmns", "category": "Metric"},
-    "B_s": {"label": "B_s (covariant)", "source": "bsubsmns", "category": "Magnetic"},
-    "B_u": {"label": "B_u (covariant)", "source": "bsubumnc", "category": "Magnetic"},
-    "B_v": {"label": "B_v (covariant)", "source": "bsubvmnc", "category": "Magnetic"},
-    "B^u": {"label": "B^u (contravariant)", "source": "bsupumnc", "category": "Magnetic"},
-    "B^v": {"label": "B^v (contravariant)", "source": "bsupvmnc", "category": "Magnetic"},
-    "j^u": {"label": "j^u", "source": "currumnc", "category": "Current"},
-    "j^v": {"label": "j^v", "source": "currvmnc", "category": "Current"},
-}
+@dataclass(frozen=True)
+class FieldSpec:
+    """Definition of a 2D/3D field on (theta, zeta)."""
+
+    key: str
+    label: str
+    cos_source: str | None
+    sin_source: str | None = None
+    category: str = "Fields"
+
+    def option(self) -> dict:
+        return {"value": self.key, "label": self.label, "category": self.category}
 
 
 def _mode_from_name(var_name: str) -> str:
     return "sin" if var_name.endswith("mns") else "cos"
 
 
-class VMECJaxProcessor:
-    """JAX accelerated helper around VMEC wout files."""
+PROFILE_SPECS: Mapping[str, ProfileSpec] = {
+    "iotaf": ProfileSpec("iotaf", "Rotational Transform (iota)", "iotaf", category="Core"),
+    "q": ProfileSpec(
+        "q",
+        "Safety Factor (q)",
+        "iotaf",
+        category="Core",
+        transform=lambda arr: 1.0 / (arr + EPS),
+    ),
+    "presf": ProfileSpec("presf", "Pressure", "presf", category="Pressure"),
+    "betapol": ProfileSpec("betapol", "beta_pol", "betapol", category="Pressure"),
+    "betator": ProfileSpec("betator", "beta_tor", "betator", category="Pressure"),
+    "beta_vol": ProfileSpec("beta_vol", "beta_vol", "beta_vol", category="Pressure"),
+    "phi": ProfileSpec("phi", "Toroidal Flux", "phi", category="Flux"),
+    "phip": ProfileSpec("phip", "dPhi/ds", "phipf", category="Flux"),
+    "vp": ProfileSpec("vp", "Volume Derivative (Vp)", "vp", category="Flux"),
+    "overr": ProfileSpec("overr", "1/R", "over_r", category="Geometry"),
+    "buco": ProfileSpec("buco", "<B^u>", "buco", category="Magnetic"),
+    "bvco": ProfileSpec("bvco", "<B^v>", "bvco", category="Magnetic"),
+    "jcuru": ProfileSpec("jcuru", "<j^u>", "jcuru", category="Current"),
+    "jcurv": ProfileSpec("jcurv", "<j^v>", "jcurv", category="Current"),
+    "bdotb": ProfileSpec("bdotb", "<B·B>", "bdotb", category="Magnetic"),
+    "DMerc": ProfileSpec("DMerc", "Mercier D", "DMerc", category="Stability"),
+    "DShear": ProfileSpec("DShear", "Shear D", "DShear", category="Stability"),
+    "DWell": ProfileSpec("DWell", "Well D", "DWell", category="Stability"),
+    "DCurr": ProfileSpec("DCurr", "Current D", "DCurr", category="Stability"),
+    "DGeod": ProfileSpec("DGeod", "Geodesic D", "DGeod", category="Stability"),
+    "jdotb": ProfileSpec("jdotb", "<J·B>", "jdotb", category="Current"),
+    "bdotgradv": ProfileSpec("bdotgradv", "<B·∇v>", "bdotgradv", category="Magnetic"),
+    "specw": ProfileSpec("specw", "Spectral Width", "specw", category="Diagnostics"),
+    "dpds": ProfileSpec(
+        "dpds",
+        "dP/ds",
+        "presf",
+        category="Pressure",
+        requires_s=True,
+        transform=lambda arr, s=None: jnp.gradient(arr, s) if s is not None else arr,
+    ),
+}
 
-    _CACHE = {}
+FIELD_SPECS: Mapping[str, FieldSpec] = {
+    "geometry": FieldSpec("geometry", "Geometry Only", None, category="Geometry"),
+    "modB": FieldSpec("modB", "|B| (Mod B)", "bmnc", sin_source="bmns", category="Magnetic"),
+    "jacobian": FieldSpec("jacobian", "sqrt(g)", "gmnc", sin_source="gmns", category="Metric"),
+    "lambda": FieldSpec("lambda", "Lambda", "lmnc", sin_source="lmns", category="Metric"),
+    "B_s": FieldSpec("B_s", "B_s (covariant)", "bsubsmnc", sin_source="bsubsmns", category="Magnetic"),
+    "B_u": FieldSpec("B_u", "B_u (covariant)", "bsubumnc", sin_source="bsubumns", category="Magnetic"),
+    "B_v": FieldSpec("B_v", "B_v (covariant)", "bsubvmnc", sin_source="bsubvmns", category="Magnetic"),
+    "B^u": FieldSpec("B^u", "B^u (contravariant)", "bsupumnc", sin_source="bsupumns", category="Magnetic"),
+    "B^v": FieldSpec("B^v", "B^v (contravariant)", "bsupvmnc", sin_source="bsupvmns", category="Magnetic"),
+    "j^u": FieldSpec("j^u", "j^u", "currumnc", sin_source="currumns", category="Current"),
+    "j^v": FieldSpec("j^v", "j^v", "currvmnc", sin_source="currvmns", category="Current"),
+}
 
+
+def _load_coefficients(ds: xr.Dataset, specs: Mapping[str, FieldSpec | ProfileSpec]) -> dict:
+    arrays = {}
+    for spec in specs.values():
+        src = spec.source
+        if src and src in ds and src not in arrays:
+            arrays[src] = jnp.asarray(ds[src].values)
+    return arrays
+
+
+def _align_profile(s_axis: jnp.ndarray, arr: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Ensure the profile array matches the expected s-grid length."""
+    arr = jnp.asarray(arr)
+    if arr.ndim == 0 or arr.shape == ():
+        arr = jnp.full_like(s_axis, arr)
+        return s_axis, arr
+    if arr.shape[0] == s_axis.shape[0]:
+        return s_axis, arr
+    if arr.shape[0] == s_axis.shape[0] - 1:
+        return s_axis[1:], arr
+    new_s = jnp.linspace(0.0, 1.0, arr.shape[0])
+    return new_s, arr
+
+
+# ---------------------------------------------------------------------------
+# Public processing class
+# ---------------------------------------------------------------------------
+class VmecPostProcessor:
+    """
+    Post-processing helper for VMEC wout files.
+
+    The API is intentionally small and documented so it can be used from the
+    Dash app or directly in notebooks. The heavy kernels live at the bottom of
+    this file and are shared across all public methods.
+    """
+
+    _CACHE: dict[str, "VmecPostProcessor"] = {}
+
+    # ---- Construction -----------------------------------------------------
     @classmethod
-    def from_file(cls, nc_path: str) -> "VMECJaxProcessor":
+    def from_file(cls, nc_path: str) -> "VmecPostProcessor":
+        """
+        Create (or reuse) a processor from a VMEC NetCDF file.
+
+        Instances are cached by absolute path + mtime so repeated calls are
+        fast but react to file changes.
+        """
         path = os.path.abspath(nc_path)
         mtime = os.path.getmtime(path)
         cached = cls._CACHE.get(path)
@@ -95,34 +171,29 @@ class VMECJaxProcessor:
         self._mtime = os.path.getmtime(self.path)
         self.ds = xr.open_dataset(self.path)
         self.ns = int(self.ds.sizes["radius"])
-        self.nfp = int(self.ds["nfp"].values.item())
+        self.nfp = int(np.asarray(self.ds["nfp"]).item())
+        self.lasym = self.ds["lasym__logical__"].values.astype(bool).item()
         self.xm = jnp.asarray(self.ds["xm"].values)
         self.xn = jnp.asarray(self.ds["xn"].values)
         self.xm_nyq = jnp.asarray(self.ds["xm_nyq"].values)
         self.xn_nyq = jnp.asarray(self.ds["xn_nyq"].values)
         self.rmnc = jnp.asarray(self.ds["rmnc"].values)
         self.zmns = jnp.asarray(self.ds["zmns"].values)
-        self._profile_arrays = {}
-        self._field_arrays = {}
-        self._profile_alias = {spec["label"]: key for key, spec in PROFILE_DEFS.items()}
-        self._field_alias = {spec["label"]: key for key, spec in FIELD_DEFS.items()}
-        self._load_arrays()
-        self._theta_cache = {}
-        self._lcfs_cache = {}
+        self.rmns = jnp.asarray(self.ds["rmns"].values) if "rmns" in self.ds else jnp.zeros_like(self.rmnc)
+        self.zmnc = jnp.asarray(self.ds["zmnc"].values) if "zmnc" in self.ds else jnp.zeros_like(self.zmns)
         self._s_grid = jnp.linspace(0.0, 1.0, self.ns)
 
-    def _load_arrays(self) -> None:
-        for spec in PROFILE_DEFS.values():
-            src = spec.get("source")
-            if src and src in self.ds and src not in self._profile_arrays:
-                self._profile_arrays[src] = jnp.asarray(self.ds[src].values)
-        for spec in FIELD_DEFS.values():
-            src = spec.get("source")
-            if src and src in self.ds and src not in self._field_arrays:
-                self._field_arrays[src] = jnp.asarray(self.ds[src].values)
+        self._profile_arrays = _load_coefficients(self.ds, PROFILE_SPECS)
+        self._field_pairs: dict[str, tuple[jnp.ndarray, jnp.ndarray]] = {}
+        self._load_field_pairs()
+        self._profile_alias = {spec.label: key for key, spec in PROFILE_SPECS.items()}
+        self._field_alias = {spec.label: key for key, spec in FIELD_SPECS.items()}
+        self._theta_cache: dict[int, jnp.ndarray] = {}
+        self._lcfs_cache: dict[tuple[float, int], tuple[jnp.ndarray, jnp.ndarray]] = {}
+        self._closed = False
 
     def close(self) -> None:
-        if getattr(self, "_closed", False):
+        if self._closed:
             return
         self.ds.close()
         self._closed = True
@@ -130,9 +201,31 @@ class VMECJaxProcessor:
         if cached is self:
             self._CACHE.pop(self.path, None)
 
-    # ------------------------------------------------------------------
-    # Helpers / metadata
-    # ------------------------------------------------------------------
+    # ---- Coefficient helpers --------------------------------------------
+    def _coeff_pair(self, cos_name: str, sin_name: str | None) -> tuple[jnp.ndarray, jnp.ndarray] | None:
+        cos = jnp.asarray(self.ds[cos_name].values) if cos_name in self.ds else None
+        sin = jnp.asarray(self.ds[sin_name].values) if (sin_name and sin_name in self.ds) else None
+        if cos is None and sin is None:
+            return None
+        if cos is None:
+            cos = jnp.zeros_like(sin)
+        if sin is None:
+            sin = jnp.zeros_like(cos)
+        if not self.lasym:
+            sin = jnp.zeros_like(cos)
+        return cos, sin
+
+    def _load_field_pairs(self) -> None:
+        for key, spec in FIELD_SPECS.items():
+            if key == "geometry":
+                continue
+            if spec.cos_source is None:
+                continue
+            pair = self._coeff_pair(spec.cos_source, spec.sin_source)
+            if pair is not None:
+                self._field_pairs[key] = pair
+
+    # ---- Metadata / helpers ----------------------------------------------
     def _get_theta(self, resolution: int) -> jnp.ndarray:
         if resolution not in self._theta_cache:
             self._theta_cache[resolution] = jnp.linspace(0.0, 2 * jnp.pi, resolution)
@@ -149,72 +242,32 @@ class VMECJaxProcessor:
         raw = jnp.linspace(0, self.ns - 1, res_s)
         return jnp.unique(jnp.asarray(jnp.round(raw), dtype=int))
 
-    def _align_profile(self, s_axis: jnp.ndarray, arr: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
-        arr = jnp.asarray(arr)
-        if arr.ndim == 0 or arr.shape == ():
-            arr = jnp.full_like(s_axis, arr)
-            return s_axis, arr
-        if arr.shape[0] == s_axis.shape[0]:
-            return s_axis, arr
-        if arr.shape[0] == s_axis.shape[0] - 1:
-            return s_axis[1:], arr
-        new_s = jnp.linspace(0.0, 1.0, arr.shape[0])
-        return new_s, arr
-
     def _profile_key(self, var_name: str) -> str:
         return self._profile_alias.get(var_name, var_name)
 
     def _field_key(self, var_name: str) -> str:
         return self._field_alias.get(var_name, var_name)
 
+    # ---- Available variables ---------------------------------------------
     def available_profiles(self) -> list[dict]:
         payload = []
-        for key, spec in PROFILE_DEFS.items():
-            src = spec.get("source")
+        for key, spec in PROFILE_SPECS.items():
+            src = spec.source
             if src and src in self._profile_arrays:
-                payload.append(
-                    {"value": key, "label": spec["label"], "category": spec.get("category", "Profiles")}
-                )
+                payload.append(spec.option())
         return payload
 
     def available_fields(self) -> list[dict]:
         payload = []
-        for key, spec in FIELD_DEFS.items():
+        for key, spec in FIELD_SPECS.items():
             if key == "geometry":
-                payload.append({"value": key, "label": spec["label"], "category": spec.get("category", "")})
+                payload.append(spec.option())
                 continue
-            src = spec.get("source")
-            if src and src in self._field_arrays:
-                payload.append(
-                    {"value": key, "label": spec["label"], "category": spec.get("category", "Fields")}
-                )
+            if key in self._field_pairs:
+                payload.append(spec.option())
         return payload
 
-    def _field_payload(self, var_name: str) -> dict | None:
-        key = self._field_key(var_name)
-        spec = FIELD_DEFS.get(key)
-        if not spec:
-            return None
-        if key == "geometry":
-            return {"key": key, "label": spec["label"], "coeffs": None}
-        src = spec.get("source")
-        coeffs = self._field_arrays.get(src)
-        if coeffs is None:
-            return None
-        mode = spec.get("mode", _mode_from_name(src))
-        use_nyq = coeffs.shape[-1] == self.xm_nyq.shape[0]
-        return {
-            "key": key,
-            "label": spec["label"],
-            "coeffs": coeffs,
-            "mode": mode,
-            "xm": self.xm_nyq if use_nyq else self.xm,
-            "xn": self.xn_nyq if use_nyq else self.xn,
-        }
-
-    # ------------------------------------------------------------------
-    # Scalars / summary information
-    # ------------------------------------------------------------------
+    # ---- Scalars / summary information -----------------------------------
     def _scalar(self, key: str, default: float = jnp.nan) -> float:
         if key not in self.ds:
             return float(default)
@@ -266,11 +319,8 @@ class VMECJaxProcessor:
             scalars["iota_edge"] = float(iota[-1])
             scalars["q_axis"] = float(1.0 / (iota[0] + EPS))
             scalars["q_edge"] = float(1.0 / (iota[-1] + EPS))
-            try:
-                shear = jnp.gradient(iota, self._s_grid)
-            except NotImplementedError:
-                shear = np.gradient(np.asarray(iota), np.asarray(self._s_grid))
-            scalars["shear_edge"] = float(np.asarray(shear)[-1])
+            shear = jnp.gradient(iota, self._s_grid)
+            scalars["shear_edge"] = float(jnp.asarray(shear)[-1])
         if pres is not None:
             scalars["pressure_axis"] = float(pres[0])
             scalars["pressure_edge"] = float(pres[-1])
@@ -303,61 +353,93 @@ class VMECJaxProcessor:
         lines.append(f"toroidal current={scalars['ctor']:.2f} MA, RB_tor={scalars['rbtor']:.3f} T·m")
         return lines
 
-    # ------------------------------------------------------------------
-    # 1D profiles
-    # ------------------------------------------------------------------
+    # ---- 1D profiles ------------------------------------------------------
     def get_1d_data(self, var_name: str):
         key = self._profile_key(var_name)
-        spec = PROFILE_DEFS.get(key)
-        base = self._profile_arrays.get(spec.get("source")) if spec else None
+        spec = PROFILE_SPECS.get(key)
+        base = self._profile_arrays.get(spec.source) if spec else None
         if spec is None or base is None:
             s_np = np.asarray(self._s_grid)
             return s_np, np.zeros_like(s_np)
         data = base
-        if spec.get("requires_s"):
-            data = spec["transform"](data, self._s_grid)
-        elif "transform" in spec:
-            data = spec["transform"](data)
-        s_axis, data = self._align_profile(self._s_grid, data)
+        if spec.requires_s:
+            data = spec.transform(data, self._s_grid) if spec.transform else data
+        elif spec.transform:
+            data = spec.transform(data)
+        s_axis, data = _align_profile(self._s_grid, data)
         return np.asarray(s_axis[1:]), np.asarray(data[1:])
 
-    # ------------------------------------------------------------------
-    # 2D slices
-    # ------------------------------------------------------------------
+    # ---- 2D slices --------------------------------------------------------
+    def _field_payload(self, var_name: str) -> dict | None:
+        key = self._field_key(var_name)
+        spec = FIELD_SPECS.get(key)
+        if not spec:
+            return None
+        if key == "geometry":
+            r_pair = self._coeff_pair("rmnc", "rmns")
+            z_pair = self._coeff_pair("zmnc", "zmns")
+            if r_pair is None or z_pair is None:
+                return None
+            return {"key": key, "label": spec.label, "r_pair": r_pair, "z_pair": z_pair}
+        pair = self._field_pairs.get(key)
+        if pair is None:
+            return None
+        cos_coeffs, _ = pair
+        use_nyq = cos_coeffs.shape[-1] == self.xm_nyq.shape[0]
+        return {
+            "key": key,
+            "label": spec.label,
+            "pair": pair,
+            "xm": self.xm_nyq if use_nyq else self.xm,
+            "xn": self.xn_nyq if use_nyq else self.xn,
+        }
+
     def get_flux_surface_data(self, s_idx: int, var_name: str, res_u: int = 128, res_v: int = 128):
         payload = self._field_payload(var_name)
-        if payload is None or payload.get("coeffs") is None:
+        if payload is None or payload.get("pair") is None:
             return None, None, None
         idx = self._sanitize_s(s_idx)
         theta = self._get_theta(res_u)
         zeta = jnp.linspace(0.0, 2 * jnp.pi / self.nfp, res_v)
-        coeffs = payload["coeffs"][idx]
-        val = _jit_evaluate_2d(coeffs, payload["xm"], payload["xn"], theta, zeta, payload["mode"])
+        cos_coeffs, sin_coeffs = payload["pair"]
+        cos_slice = cos_coeffs[idx]
+        sin_slice = sin_coeffs[idx]
+        val = _jit_evaluate_2d_pair(cos_slice, sin_slice, payload["xm"], payload["xn"], theta, zeta)
         return np.asarray(theta), np.asarray(zeta), np.asarray(val)
 
     def get_cross_section_data(self, phi: float, var_name: str, res_s: int = 48, res_u: int = 160):
         theta = self._get_theta(res_u)
         s_indices = self._sample_s_indices(res_s)
         r_grid, z_grid = _jit_cross_section_batch(
-            self.rmnc[s_indices], self.zmns[s_indices], self.xm, self.xn, theta, phi
+            self.rmnc[s_indices],
+            self.rmns[s_indices],
+            self.zmns[s_indices],
+            self.zmnc[s_indices],
+            self.xm,
+            self.xn,
+            theta,
+            phi,
         )
         payload = self._field_payload(var_name)
-        if payload is None or payload.get("coeffs") is None or payload.get("key") == "geometry":
+        if payload is None or payload.get("pair") is None or payload.get("key") == "geometry":
             val_grid = jnp.tile((s_indices / (self.ns - 1))[:, None], (1, theta.size))
         else:
-            coeffs = payload["coeffs"][s_indices]
-            if coeffs.shape[0] > 1 and s_indices[0] == 0:
-                coeffs = coeffs.at[0].set(coeffs[1])
-            val_grid = _jit_evaluate_line_batch(
-                coeffs, payload["xm"], payload["xn"], theta, phi, payload["mode"]
-            )
+            cos_coeffs, sin_coeffs = payload["pair"]
+            cos_slice = cos_coeffs[s_indices]
+            sin_slice = sin_coeffs[s_indices]
+            if cos_slice.shape[0] > 1 and s_indices[0] == 0:
+                cos_slice = cos_slice.at[0].set(cos_slice[1])
+                sin_slice = sin_slice.at[0].set(sin_slice[1])
+            val_grid = _jit_evaluate_line_pair(cos_slice, sin_slice, payload["xm"], payload["xn"], theta, phi)
         return np.asarray(r_grid), np.asarray(z_grid), np.asarray(val_grid)
 
     def _lcfs(self, phi: float, resolution: int = 256):
         key = (float(phi), resolution)
         if key not in self._lcfs_cache:
             theta = self._get_theta(resolution)
-            r, z = _jit_cross_section_batch(self.rmnc[-1], self.zmns[-1], self.xm, self.xn, theta, phi)
+            r, z = _jit_cross_section_batch(
+                self.rmnc[-1], self.rmns[-1], self.zmns[-1], self.zmnc[-1], self.xm, self.xn, theta, phi
+            )
             self._lcfs_cache[key] = (r.reshape(-1), z.reshape(-1))
         return self._lcfs_cache[key]
 
@@ -382,257 +464,228 @@ class VMECJaxProcessor:
         val_grid[~mask] = np.nan
         return np.asarray(r_lin), np.asarray(z_lin), val_grid
 
-    # ------------------------------------------------------------------
-    # 3D geometry
-    # ------------------------------------------------------------------
+    # ---- 3D geometry ------------------------------------------------------
     def compute_3d_surface(self, s_idx: int = -1, var_name: str = "modB", resolution: int = 128):
         idx = self._sanitize_s(s_idx)
         theta = self._get_theta(resolution)
         phi = self._get_theta(resolution)
         payload = self._field_payload(var_name)
-        coeffs = None
-        xm_var, xn_var, mode = self.xm, self.xn, "cos"
-        if payload and payload.get("coeffs") is not None and payload.get("key") != "geometry":
-            coeffs = payload["coeffs"][idx]
-            xm_var, xn_var, mode = payload["xm"], payload["xn"], payload["mode"]
+        xm_var, xn_var = self.xm, self.xn
+        var_cos = jnp.zeros_like(self.rmnc[idx])
+        var_sin = jnp.zeros_like(self.rmnc[idx])
+        if payload and payload.get("pair") is not None and payload.get("key") != "geometry":
+            var_cos_full, var_sin_full = payload["pair"]
+            var_cos = var_cos_full[idx]
+            var_sin = var_sin_full[idx]
+            xm_var, xn_var = payload["xm"], payload["xn"]
         x, y, z, val = _jit_surface_3d(
             self.rmnc[idx],
+            self.rmns[idx],
             self.zmns[idx],
-            coeffs if coeffs is not None else jnp.zeros_like(self.rmnc[idx]),
+            self.zmnc[idx],
+            var_cos,
+            var_sin,
             self.xm,
             self.xn,
             xm_var,
             xn_var,
             theta,
             phi,
-            mode,
         )
         return np.asarray(x), np.asarray(y), np.asarray(z), np.asarray(val)
 
-    # ------------------------------------------------------------------
-    # Field Line Tracing
-    # ------------------------------------------------------------------
-    def compute_field_line_properties(self, s_idx: int, alpha_points: int = 256, zeta_points: int = 256, 
-                                      n_transits: int = 0, alpha0: float = 0.0, single_line: bool = False):
+    # ---- Field line tracing ----------------------------------------------
+    def compute_field_line_properties(
+        self,
+        s_idx: int,
+        alpha_points: int = 256,
+        zeta_points: int = 256,
+        n_transits: int = 0,
+        alpha0: float = 0.0,
+        single_line: bool = False,
+        zeta_offset: float = 0.0,
+    ):
         """
         Compute |B| in (alpha, zeta) coordinates.
-        If single_line is True, computes for a single field line over n_transits.
-        Otherwise computes for a grid of alpha values.
+
+        If ``single_line`` is True, compute one field line over ``n_transits``.
+        Otherwise compute a grid of alpha values on a single toroidal period.
         """
         idx = self._sanitize_s(s_idx)
-        
-        # Extract parameters for this flux surface
-        lmns = self._field_arrays.get('lmns')[idx]
-        bmnc = self._field_arrays.get('bmnc')[idx]
-        iota = self._profile_arrays.get('iotaf')[idx]
-        
-        # Determine which xm/xn arrays to use based on coefficient size
-        xm_l = self.xm if lmns.shape[-1] == self.xm.shape[0] else self.xm_nyq
-        xn_l = self.xn if lmns.shape[-1] == self.xn.shape[0] else self.xn_nyq
-        
+        lambda_pair = self._coeff_pair("lmnc", "lmns")
+        b_pair = self._coeff_pair("bmnc", "bmns")
+        if lambda_pair is None or b_pair is None:
+            return None, None, None
+        lmnc, lmns = lambda_pair
+        bmnc, bmns = b_pair
+        iota = self._profile_arrays.get("iotaf")[idx]
+
+        xm_l = self.xm if lmnc.shape[-1] == self.xm.shape[0] else self.xm_nyq
+        xn_l = self.xn if lmnc.shape[-1] == self.xn.shape[0] else self.xn_nyq
         xm_b = self.xm if bmnc.shape[-1] == self.xm.shape[0] else self.xm_nyq
         xn_b = self.xn if bmnc.shape[-1] == self.xn.shape[0] else self.xn_nyq
-        
+
         params = {
-            'nfp': self.nfp,
-            'iota': iota,
-            'xm_b': xm_b,
-            'xn_b': xn_b,
-            'xm_lambda': xm_l,
-            'xn_lambda': xn_l,
-            'bmnc': bmnc,
-            'lmns': lmns,
+            "nfp": self.nfp,
+            "iota": iota,
+            "xm_b": xm_b,
+            "xn_b": xn_b,
+            "xm_lambda": xm_l,
+            "xn_lambda": xn_l,
+            "bmnc": bmnc[idx],
+            "bmns": bmns[idx],
+            "lmnc": lmnc[idx],
+            "lmns": lmns[idx],
         }
-        
+
         zeta_max = 2.0 * jnp.pi / self.nfp
-        zeta_grid = jnp.linspace(0.0, zeta_max, zeta_points, endpoint=False)
-        
+        zeta_grid = jnp.linspace(0.0, zeta_max, zeta_points, endpoint=False) + float(zeta_offset)
+
         if single_line:
-            # Compute shifted alphas for single line trace
-            # Ensure n_transits is at least 1
             n_transits = max(1, n_transits)
             alpha_segments = compute_shifted_alphas(alpha0, n_transits, params)
-            B_data = compute_all_grid(alpha_segments, zeta_grid, params)
-            return np.asarray(zeta_grid), np.asarray(alpha_segments), np.asarray(B_data)
-        else:
-            # Full grid
-            alpha_grid = jnp.linspace(0.0, 2.0 * jnp.pi, alpha_points, endpoint=False)
-            B_data = compute_all_grid(alpha_grid, zeta_grid, params)
-            return np.asarray(alpha_grid), np.asarray(zeta_grid), np.asarray(B_data)
-# ----------------------------------------------------------------------
+            b_data = compute_all_grid(alpha_segments, zeta_grid, params)
+            return np.asarray(zeta_grid), np.asarray(alpha_segments), np.asarray(b_data)
+
+        alpha_grid = jnp.linspace(0.0, 2.0 * jnp.pi, alpha_points, endpoint=False)
+        b_data = compute_all_grid(alpha_grid, zeta_grid, params)
+        return np.asarray(alpha_grid), np.asarray(zeta_grid), np.asarray(b_data)
+
+
+# ---------------------------------------------------------------------------
 # JAX kernels
-# ----------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 @jax.jit
-def _jit_cross_section_batch(rmnc, zmns, xm, xn, theta, phi):
+def _jit_cross_section_batch(rmnc, rmns, zmns, zmnc, xm, xn, theta, phi):
     if rmnc.ndim == 1:
         rmnc = rmnc[None, :]
+        rmns = rmns[None, :]
         zmns = zmns[None, :]
+        zmnc = zmnc[None, :]
     angle = jnp.outer(xm, theta) - jnp.outer(xn, jnp.full_like(theta, phi))
     cos_terms = jnp.cos(angle)
     sin_terms = jnp.sin(angle)
-    r = rmnc @ cos_terms
-    z = zmns @ sin_terms
+    r = (rmnc @ cos_terms) + (rmns @ sin_terms)
+    z = (zmns @ sin_terms) + (zmnc @ cos_terms)
     return r, z
 
 
-@partial(jax.jit, static_argnames=["mode"])
-def _jit_evaluate_line_batch(coeffs, xm, xn, theta, phi, mode):
-    if coeffs.ndim == 1:
-        coeffs = coeffs[None, :]
+@jax.jit
+def _jit_evaluate_line_pair(cos_coeffs, sin_coeffs, xm, xn, theta, phi):
+    if cos_coeffs.ndim == 1:
+        cos_coeffs = cos_coeffs[None, :]
+        sin_coeffs = sin_coeffs[None, :]
     angle = jnp.outer(xm, theta) - jnp.outer(xn, jnp.full_like(theta, phi))
-    trig = jnp.cos(angle) if mode == "cos" else jnp.sin(angle)
-    return coeffs @ trig
+    cos_trig = jnp.cos(angle)
+    sin_trig = jnp.sin(angle)
+    return (cos_coeffs @ cos_trig) + (sin_coeffs @ sin_trig)
 
 
-@partial(jax.jit, static_argnames=["mode"])
-def _jit_evaluate_2d(coeffs, xm, xn, theta, zeta, mode):
+@jax.jit
+def _jit_evaluate_2d_pair(cos_coeffs, sin_coeffs, xm, xn, theta, zeta):
     theta_grid, zeta_grid = jnp.meshgrid(theta, zeta, indexing="ij")
     angle = (xm[:, None, None] * theta_grid[None, :, :]) - (xn[:, None, None] * zeta_grid[None, :, :])
-    trig = jnp.cos(angle) if mode == "cos" else jnp.sin(angle)
-    return jnp.sum(coeffs[:, None, None] * trig, axis=0)
+    cos_trig = jnp.cos(angle)
+    sin_trig = jnp.sin(angle)
+    return jnp.sum(cos_coeffs[:, None, None] * cos_trig + sin_coeffs[:, None, None] * sin_trig, axis=0)
 
 
-@partial(jax.jit, static_argnames=["mode"])
-def _jit_surface_3d(rmnc, zmns, coeffs, xm, xn, xm_var, xn_var, theta, phi, mode):
+@jax.jit
+def _jit_surface_3d(r_cos, r_sin, z_sin, z_cos, var_cos, var_sin, xm, xn, xm_var, xn_var, theta, phi):
     theta_grid, phi_grid = jnp.meshgrid(theta, phi, indexing="ij")
     angle_geom = (xm[:, None, None] * theta_grid[None, :, :]) - (xn[:, None, None] * phi_grid[None, :, :])
-    r = jnp.sum(rmnc[:, None, None] * jnp.cos(angle_geom), axis=0)
-    z_val = jnp.sum(zmns[:, None, None] * jnp.sin(angle_geom), axis=0)
+    cos_geom = jnp.cos(angle_geom)
+    sin_geom = jnp.sin(angle_geom)
+    r = jnp.sum(r_cos[:, None, None] * cos_geom + r_sin[:, None, None] * sin_geom, axis=0)
+    z_val = jnp.sum(z_sin[:, None, None] * sin_geom + z_cos[:, None, None] * cos_geom, axis=0)
     x_val = r * jnp.cos(phi_grid)
     y_val = r * jnp.sin(phi_grid)
+
     angle_var = (xm_var[:, None, None] * theta_grid[None, :, :]) - (xn_var[:, None, None] * phi_grid[None, :, :])
-    trig = jnp.cos(angle_var) if mode == "cos" else jnp.sin(angle_var)
-    val = jnp.sum(coeffs[:, None, None] * trig, axis=0)
+    cos_var = jnp.cos(angle_var)
+    sin_var = jnp.sin(angle_var)
+    val = jnp.sum(var_cos[:, None, None] * cos_var + var_sin[:, None, None] * sin_var, axis=0)
     return x_val, y_val, z_val, val
 
 
 # ----------------------------------------------------------------------
-# Field Line Tracing Kernels (from plot_az_jax.py)
+# Field line tracing kernels (from plot_az_jax.py)
 # ----------------------------------------------------------------------
-
 @jax.jit
-def eval_Lambda(theta, zeta, xm, xn, lmns):
-    """
-    Evaluate Lambda(theta, zeta) = sum lmns * sin(xm*theta - xn*zeta).
-    """
+def eval_Lambda(theta, zeta, xm, xn, lmnc, lmns):
     arg = xm * theta - xn * zeta
-    return jnp.sum(lmns * jnp.sin(arg))
+    return jnp.sum(lmnc * jnp.cos(arg) + lmns * jnp.sin(arg))
 
 
 @jax.jit
-def eval_B(theta, zeta, xm, xn, bmnc):
-    """
-    Evaluate |B|(theta, zeta) = sum bmnc * cos(xm*theta - xn*zeta).
-    """
+def eval_B(theta, zeta, xm, xn, bmnc, bmns):
     arg = xm * theta - xn * zeta
-    return jnp.sum(bmnc * jnp.cos(arg))
+    return jnp.sum(bmnc * jnp.cos(arg) + bmns * jnp.sin(arg))
 
 
 @jax.jit
-def residual_fn(theta, alpha, zeta, iota, xm_l, xn_l, lmns):
-    """
-    Implicit equation F(theta) = theta + Lambda(theta, zeta) - iota*zeta - alpha = 0.
-    """
-    lam = eval_Lambda(theta, zeta, xm_l, xn_l, lmns)
+def residual_fn(theta, alpha, zeta, iota, xm_l, xn_l, lmnc, lmns):
+    lam = eval_Lambda(theta, zeta, xm_l, xn_l, lmnc, lmns)
     return theta + lam - iota * zeta - alpha
 
 
-@partial(jax.jit, static_argnames=['max_iter'])
-def newton_solver(alpha, zeta, theta_init, iota, xm_l, xn_l, lmns, tol=1e-12, max_iter=100):
-    """
-    Solve F(theta) = 0 for theta using Newton's method with AD.
-    """
-    
+@partial(jax.jit, static_argnames=["max_iter"])
+def newton_solver(alpha, zeta, theta_init, iota, xm_l, xn_l, lmnc, lmns, tol=1e-12, max_iter=100):
     def cond_fun(state):
         _, diff, count = state
         return (diff > tol) & (count < max_iter)
 
     def body_fun(state):
         theta, _, count = state
-        
-        # Calculate F and F' (dF/dtheta) using auto-diff
-        # argnums=0 means differentiate w.r.t theta
-        F, dF_dtheta = jax.value_and_grad(residual_fn, argnums=0)(
-            theta, alpha, zeta, iota, xm_l, xn_l, lmns
+        f_val, d_f_dtheta = jax.value_and_grad(residual_fn, argnums=0)(
+            theta, alpha, zeta, iota, xm_l, xn_l, lmnc, lmns
         )
-        
-        # Newton step
-        step = -F / dF_dtheta
+        step = -f_val / d_f_dtheta
         theta_new = theta + step
-        
-        # Note: No wrapping of theta (theta % 2pi) to allow continuous evolution
-        
         return theta_new, jnp.abs(step), count + 1
 
-    # Initial state: (theta, diff, count)
-    # Set initial diff to be > tol so loop starts
     init_state = (theta_init, 1.0, 0)
-    
     final_state = jax.lax.while_loop(cond_fun, body_fun, init_state)
     return final_state[0]
 
 
 @jax.jit
 def compute_field_line_scan(alpha, zeta_grid, params):
-    """
-    Compute |B| along a single field line (fixed alpha) by scanning over zeta.
-    Uses the previous theta solution as the initial guess for the next point.
-    """
-    iota = params['iota']
-    xm_l = params['xm_lambda']
-    xn_l = params['xn_lambda']
-    lmns = params['lmns']
-    xm_b = params['xm_b']
-    xn_b = params['xn_b']
-    bmnc = params['bmnc']
-    
-    # Initial guess for the very first point (zeta = zeta_grid[0])
-    # Straight-field-line approximation: theta = alpha + iota * zeta
-    theta_init = alpha + iota * zeta_grid[0]
-    
-    def scan_body(theta_prev, zeta):
-        # Use theta_prev as the initial guess for the Newton solver
-        theta_sol = newton_solver(
-            alpha, zeta, theta_prev, 
-            iota, xm_l, xn_l, lmns, 
-            tol=1e-12, max_iter=100
-        )
-        
-        # Compute |B| at the solution
-        B_val = eval_B(theta_sol, zeta, xm_b, xn_b, bmnc)
-        
-        # Pass theta_sol as the carry to the next step
-        return theta_sol, B_val
+    iota = params["iota"]
+    xm_l = params["xm_lambda"]
+    xn_l = params["xn_lambda"]
+    lmnc = params["lmnc"]
+    lmns = params["lmns"]
+    xm_b = params["xm_b"]
+    xn_b = params["xn_b"]
+    bmnc = params["bmnc"]
+    bmns = params["bmns"]
 
-    # jax.lax.scan returns (final_carry, stacked_outputs)
-    _, B_line = jax.lax.scan(scan_body, theta_init, zeta_grid)
-    
-    return B_line
+    theta_init = alpha + iota * zeta_grid[0]
+
+    def scan_body(theta_prev, zeta):
+        theta_sol = newton_solver(alpha, zeta, theta_prev, iota, xm_l, xn_l, lmnc, lmns, tol=1e-12, max_iter=100)
+        b_val = eval_B(theta_sol, zeta, xm_b, xn_b, bmnc, bmns)
+        return theta_sol, b_val
+
+    _, b_line = jax.lax.scan(scan_body, theta_init, zeta_grid)
+    return b_line
 
 
 @jax.jit
 def compute_all_grid(alpha_grid, zeta_grid, params):
-    """
-    Vectorize the field line computation over all alpha values.
-    """
-    # vmap over the first argument (alpha), broadcast others
-    return jax.vmap(compute_field_line_scan, in_axes=(0, None, None))(
-        alpha_grid, zeta_grid, params
-    )
+    return jax.vmap(compute_field_line_scan, in_axes=(0, None, None))(alpha_grid, zeta_grid, params)
 
 
-@partial(jax.jit, static_argnames=['n_transits'])
+@partial(jax.jit, static_argnames=["n_transits"])
 def compute_shifted_alphas(alpha0, n_transits, params):
-    """
-    Compute the sequence of alpha values for a single field line
-    mapped back to the first period:
-    alpha_k = (alpha0 + k * iota * 2pi/nfp) % 2pi
-    """
-    iota = params['iota']
-    nfp = params['nfp']
+    iota = params["iota"]
+    nfp = params["nfp"]
     k_vals = jnp.arange(n_transits)
-    
-    # Shift
     delta_alpha = iota * (2.0 * jnp.pi / nfp)
     alphas = (alpha0 + k_vals * delta_alpha) % (2.0 * jnp.pi)
     return alphas
+
+
+# Public alias preserved for the Dash app
+VMECJaxProcessor = VmecPostProcessor

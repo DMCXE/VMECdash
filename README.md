@@ -1,37 +1,41 @@
-# VMEC Viewer
+# VMECdash
 
 An interactive Dash application for exploring VMEC `wout_*.nc` stellarator equilibria.  
-It reconstructs magnetic surfaces with JAX, renders 1‑D/2‑D/3‑D plots, and exposes a summary dashboard similar to **VMECplot.m**.
+It reconstructs magnetic surfaces with JAX, renders 1‑D/2‑D/3‑D plots and so on, motivated by the original MATLAB tool **VMECplot.m**.
+
+**Motivation:** Quickly inspect the VMEC equilibrium quantities of interest **without relying on** difficult-for-starter-to-compile programs (such as **libstell**) or memory-heavy commercial software (such as **MATLAB**).
+
+[![VMECdash Screenshot](example/summary.png)](example/summary.png)
 
 ---
-
 ## Features
 
 - **File upload** for standard VMEC `wout` NetCDF output.
 - **Summary dashboard** with key scalar diagnostics and highlighted metadata (free/fixed boundary, mgrid file, etc.).
-- **1‑D profiles** for rotational transform, safety factor, pressure, enclosed volume, beta metrics, and more.
+- **1‑D profiles** for rotational transform, safety factor, pressure, volume derivative, beta metrics, and more.
 - **2‑D visualisations**:
   - R‑Z cross sections with geometry or interpolated scalar fields.
   - θ‑ζ flux-surface contours across a field period.
 - **3‑D flux surfaces** with optional coordinate‑free background shading.
-- **Client‑side download** button for exporting the current figure as PNG.
-- **JAX acceleration** for geometry reconstruction while still integrating with SciPy/Plotly tooling.
+- **Field lines viewer** for $\alpha-\zeta$ coordinates on selected flux
+  - A nice choice for visualising magnetic ripple
+  - 2D plots of $|B|(\alpha, \zeta)$
+  - 1D plots of single period field line traces with different initial $\alpha$ values
+  - Single field line transistions.
+- **JAX acceleration** for geometry reconstruction.
 
 ---
 
 ## Requirements
 
-Python 3.10+ is recommended. Install dependencies with pip:
+Python 3.10+ is recommended. Install dependencies with conda:(optional)
 
 ```bash
-python -m venv .venv
-.\.venv\Scripts\activate           # Windows
-pip install --upgrade pip
+conda activate your_env_name
 pip install -r requirements.txt
 ```
 
-> **Note for Windows users:** install the CPU version of JAX with  
-> `pip install -r requirements.txt "jax[cpu]"`  
+> **Note for JAX:** If you don't have a GPU/TPU or your gpu is not supported for FP64(like metal), then simply running `pip install jax[cpu]` to  install the CPU-only version is good enough.
 > GPU/TPU wheels require platform-specific instructions from the [JAX documentation](https://github.com/google/jax#pip-installation).
 
 ---
@@ -39,7 +43,7 @@ pip install -r requirements.txt
 ## Running the App
 
 ```bash
-python app.py
+python VMECdash.py
 ```
 
 Dash defaults to `http://127.0.0.1:8050/`. The layout is responsive, so you can resize the browser to focus on plots or the control sidebar.
@@ -64,20 +68,20 @@ For heavy 2‑D physics overlays, a pre-computation step runs on the server whil
 
 ## Repository Layout
 
-| Path            | Description                                                      |
-| --------------- | ---------------------------------------------------------------- |
-| `app.py`        | Dash layout, callbacks, and UI logic.                            |
-| `test_app.py`   | Dash layout, callbacks, and UI logic. Better than upper                          |
-| `vmec_jax.py`   | JAX-powered data processor for VMEC equilibria.                  |
-| `requirements.txt` | Python dependencies.                                          |
-| `wout_PO.nc`    | Example VMEC equilibrium (use your own files for new cases).     |
+| Path               | Description                                                      |
+| ------------------ | ---------------------------------------------------------------- |
+| `VMECdash.py`| Main Dash entry point (layout + callbacks).                      |
+| `vmec_jax.py`      | JAX-powered data processor for VMEC equilibria.                  |
+| `views/`           | Modular UI components (overview, profiles, 2D/3D, fieldlines).  |
+| `ui/`              | Shared UI helper components.                                    |
+| `requirements.txt` | Python dependencies.                                             |
+| `example/wout_PO.nc`       | Example VMEC equilibrium (use your own files for new cases).     |
 
 ---
 
-## Troubleshooting
-
-- **JAX import errors on Windows**: ensure you installed `jax[cpu]` and that no conflicting CUDA/TensorFlow packages are present.
-- **Blank downloads**: make sure the plot has finished rendering before clicking the download button.
-- **Large NetCDF files**: the processor uses lazy loading via `xarray`, but very high resolution VMEC outputs can still require significant RAM.
-
+## TroubleShooting
 Feel free to open issues or pull requests to add new physical quantities, UI tweaks, or performance optimisations. Enjoy exploring your VMEC equilibria! 
+
+## Next step
+- Add jax-based boozer coordinate transformation.
+- Fast evaulation of EffetiveRipple, GammaC, maybe slow without gpu.
