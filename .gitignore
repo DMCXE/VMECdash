@@ -1,4 +1,5 @@
 /__pycache__/
 /ui/__pycache__/
 /views/__pycache__/
+/helper_tools/
 .DS_Store

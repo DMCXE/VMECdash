@@ -18,6 +18,7 @@ from scipy.interpolate import griddata
 jax.config.update("jax_enable_x64", True)
 
 EPS = 1e-12
+MU0_SI = 4 * math.pi * 1e-7  # N/A^2
 
 
 # ---------------------------------------------------------------------------
@@ -47,6 +48,22 @@ class FieldSpec:
     cos_source: str | None
     sin_source: str | None = None
     category: str = "Fields"
+
+    def option(self) -> dict:
+        return {"value": self.key, "label": self.label, "category": self.category}
+
+
+@dataclass(frozen=True)
+class ComputedProfileSpec:
+    """Definition of a computed flux-surface-averaged profile."""
+
+    key: str
+    label: str
+    compute: Callable[[Mapping[str, tuple[np.ndarray, np.ndarray]]], tuple[np.ndarray, np.ndarray]]
+    requires: tuple[str, ...]
+    y_label: str
+    color: str = "#f59f00"
+    category: str = "Computed"
 
     def option(self) -> dict:
         return {"value": self.key, "label": self.label, "category": self.category}
@@ -134,6 +151,87 @@ def _align_profile(s_axis: jnp.ndarray, arr: jnp.ndarray) -> tuple[jnp.ndarray, 
     return new_s, arr
 
 
+def _prepend_axis_if_missing(s: jnp.ndarray, y: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Insert s=0 at the front if get_1d_data dropped it."""
+    s = jnp.asarray(s)
+    y = jnp.asarray(y)
+    if s.size == 0:
+        return s, y
+    if s[0] > 0.0:
+        s = jnp.concatenate((jnp.array([0.0]), s))
+        y = jnp.concatenate((y[:1], y))
+    return s, y
+
+
+def _grad_uniform(y: jnp.ndarray, ds: float) -> jnp.ndarray:
+    """Uniform-grid gradient (central in interior, one-sided at ends)."""
+    dy = jnp.empty_like(y)
+    dy = dy.at[1:-1].set((y[2:] - y[:-2]) / (2.0 * ds))
+    dy = dy.at[0].set((y[1] - y[0]) / ds)
+    dy = dy.at[-1].set((y[-1] - y[-2]) / ds)
+    return dy
+
+
+def compute_magnetic_well_profile(
+    profile_data: Mapping[str, tuple[np.ndarray, np.ndarray]], *, mu0: float = MU0_SI
+) -> tuple[np.ndarray, np.ndarray]:
+    """Compute a magnetic-well proxy W(s) using p(s), V'(s), and <B^2>(s)."""
+    required = ("presf", "vp", "bdotb")
+    missing = [key for key in required if key not in profile_data]
+    if missing:
+        raise KeyError(f"Missing required profiles for magnetic_well: {', '.join(sorted(missing))}")
+
+    s_p, pres = profile_data["presf"]
+    s_v, vp = profile_data["vp"]
+    s_b, b2 = profile_data["bdotb"]
+
+    s_p, pres = _prepend_axis_if_missing(s_p, pres)
+    s_v, vp = _prepend_axis_if_missing(s_v, vp)
+    s_b, b2 = _prepend_axis_if_missing(s_b, b2)
+
+    s_p = jnp.asarray(s_p)
+    pres = jnp.asarray(pres)
+    s_v = jnp.asarray(s_v)
+    vp = jnp.asarray(vp)
+    s_b = jnp.asarray(s_b)
+    b2 = jnp.asarray(b2)
+
+    s = s_p
+    if not (jnp.allclose(s_v, s) and jnp.allclose(s_b, s)):
+        vp = jnp.interp(s, s_v, vp)
+        b2 = jnp.interp(s, s_b, b2)
+
+    if s.size < 2:
+        return np.asarray(s), np.asarray(jnp.zeros_like(s))
+
+    ds = float(s[1] - s[0])
+    dpds = _grad_uniform(pres, ds)
+    db2ds = _grad_uniform(b2, ds)
+
+    ds_arr = jnp.diff(s)
+    V_tail = jnp.cumsum(0.5 * (vp[1:] + vp[:-1]) * ds_arr)
+    V = jnp.concatenate((jnp.array([0.0]), V_tail))
+
+    denom = vp * b2
+    numer = V * (2.0 * mu0 * dpds + db2ds)
+    well = jnp.where(jnp.abs(denom) > 0, numer / denom, 0.0)
+    well = well.at[0].set(0.0)
+
+    return np.asarray(s), np.asarray(well)
+
+
+COMPUTED_PROFILE_SPECS: Mapping[str, ComputedProfileSpec] = {
+    "magnetic_well": ComputedProfileSpec(
+        key="magnetic_well",
+        label="Magnetic Well",
+        compute=compute_magnetic_well_profile,
+        requires=("presf", "vp", "bdotb"),
+        y_label="Well",
+        color="#f59f00",
+    ),
+}
+
+
 # ---------------------------------------------------------------------------
 # Public processing class
 # ---------------------------------------------------------------------------
@@ -188,6 +286,7 @@ class VmecPostProcessor:
         self._load_field_pairs()
         self._profile_alias = {spec.label: key for key, spec in PROFILE_SPECS.items()}
         self._field_alias = {spec.label: key for key, spec in FIELD_SPECS.items()}
+        self._computed_alias = {spec.label: key for key, spec in COMPUTED_PROFILE_SPECS.items()}
         self._theta_cache: dict[int, jnp.ndarray] = {}
         self._lcfs_cache: dict[tuple[float, int], tuple[jnp.ndarray, jnp.ndarray]] = {}
         self._closed = False
@@ -200,6 +299,17 @@ class VmecPostProcessor:
         cached = self._CACHE.get(self.path)
         if cached is self:
             self._CACHE.pop(self.path, None)
+
+    # ---- Small utilities ---------------------------------------------------
+    @staticmethod
+    def _prepend_axis_if_missing(s: jnp.ndarray, y: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
+        """Wrapper for the module-level helper (kept for compatibility)."""
+        return _prepend_axis_if_missing(s, y)
+
+    @staticmethod
+    def _grad_uniform(y: jnp.ndarray, ds: float) -> jnp.ndarray:
+        """Wrapper for the module-level helper (kept for compatibility)."""
+        return _grad_uniform(y, ds)
 
     # ---- Coefficient helpers --------------------------------------------
     def _coeff_pair(self, cos_name: str, sin_name: str | None) -> tuple[jnp.ndarray, jnp.ndarray] | None:
@@ -248,6 +358,9 @@ class VmecPostProcessor:
     def _field_key(self, var_name: str) -> str:
         return self._field_alias.get(var_name, var_name)
 
+    def _computed_key(self, var_name: str) -> str:
+        return self._computed_alias.get(var_name, var_name)
+
     # ---- Available variables ---------------------------------------------
     def available_profiles(self) -> list[dict]:
         payload = []
@@ -256,6 +369,9 @@ class VmecPostProcessor:
             if src and src in self._profile_arrays:
                 payload.append(spec.option())
         return payload
+
+    def available_computed_profiles(self) -> list[dict]:
+        return [spec.option() for spec in COMPUTED_PROFILE_SPECS.values()]
 
     def available_fields(self) -> list[dict]:
         payload = []
@@ -368,6 +484,22 @@ class VmecPostProcessor:
             data = spec.transform(data)
         s_axis, data = _align_profile(self._s_grid, data)
         return np.asarray(s_axis[1:]), np.asarray(data[1:])
+
+    def computed_profile_spec(self, var_name: str) -> ComputedProfileSpec | None:
+        key = self._computed_key(var_name)
+        return COMPUTED_PROFILE_SPECS.get(key)
+
+    def is_computed_profile(self, var_name: str) -> bool:
+        return self.computed_profile_spec(var_name) is not None
+
+    def compute1d(self, name: str, **kwargs) -> tuple[np.ndarray, np.ndarray]:
+        """Compute a derived 1D profile by name."""
+        key = self._computed_key(name)
+        spec = COMPUTED_PROFILE_SPECS.get(key)
+        if spec is None:
+            raise KeyError(f"Unknown computed profile '{name}'")
+        profiles = {req: self.get_1d_data(req) for req in spec.requires}
+        return spec.compute(profiles, **kwargs)
 
     # ---- 2D slices --------------------------------------------------------
     def _field_payload(self, var_name: str) -> dict | None:

@@ -29,8 +29,10 @@ app = dash.Dash(
     __name__, 
     title="VMEC Dashboard",
     suppress_callback_exceptions=True,
-    external_stylesheets=dmc.styles.ALL
+    external_stylesheets=dmc.styles.ALL,
+    assets_folder="assets"
 )
+app._favicon = "icon_stell_circle.png"
 server = app.server
 
 # -----------------------
@@ -87,12 +89,18 @@ app.layout = dmc.MantineProvider(
                         children=[
                             dmc.Group([
                                 dmc.ThemeIcon(
-                                    # get_icon("mdi:atom-variant"),
-                                    get_icon("picon:infinity"),
                                     variant="gradient",
-                                    gradient={"from": "cyan", "to": "indigo"},
+                                    # gradient={"from": "cyan", "to": "indigo"},
+                                    # gradient={"from": "slateblue", "to": "thistle"},
+                                    gradient={"from": "skyblue", "to": "thistle"},
                                     size="lg",
-                                    radius="xl"
+                                    radius="xl",
+                                    children=dmc.Avatar(
+                                        src="/assets/icon_stell_noback.png",
+                                        size=32,
+                                        radius="xl",
+                                        alt="VMEC Dashboard"
+                                    )
                                 ),
                                 dmc.Stack([
                                     dmc.Group([
@@ -292,6 +300,7 @@ def handle_upload(contents_nav, contents_center, fname_nav, fname_center):
             "ns": vmec.ns,
             "nfp": vmec.nfp,
             "profiles": vmec.available_profiles(),
+            "computed_profiles": vmec.available_computed_profiles(),
             "fields": vmec.available_fields(),
             "summary_lines": vmec.get_summary_lines(),
         }
@@ -340,8 +349,10 @@ def update_controls(meta):
     if not meta: return dash.no_update
     
     profiles_data = unique_options(build_select_data(meta.get('profiles', [])))
+    computed_profiles = unique_options(build_select_data(meta.get('computed_profiles', [])))
+    all_profile_options = unique_options(profiles_data + computed_profiles)
     profile_radios = dmc.Stack(
-        [dmc.Radio(label=p['label'], value=p['value'], size="sm") for p in profiles_data],
+        [dmc.Radio(label=p['label'], value=p['value'], size="sm") for p in all_profile_options],
         gap="xs"
     )
 
