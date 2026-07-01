@@ -48,6 +48,32 @@ python VMECdash.py
 
 Dash defaults to `http://127.0.0.1:8050/`. The layout is responsive, so you can resize the browser to focus on plots or the control sidebar.
 
+The packaged entry point is also available after installation:
+
+```bash
+pip install -e ".[dash]"
+vmecdash serve
+```
+
+---
+
+## VS Code Native Preview
+
+VMECdash now includes the first native VS Code integration surface:
+
+- a Dash-free Python backend at `python -m vmecdash.vscode_backend --stdio`;
+- a workspace VS Code extension under `extension/`;
+- a Custom Readonly Editor for `wout*.nc` files;
+- a Webview UI that renders backend Plotly figures with bundled `plotly.min.js`.
+
+For local development, install the Python package in the interpreter VS Code should use:
+
+```bash
+pip install -e .
+```
+
+Then open `extension/` as a VS Code extension development project or package it as a VSIX. In Remote-SSH, install `vmecdash` in the remote Python environment and set `vmecdash.pythonPath` if VS Code does not pick the desired interpreter.
+
 
 ---
 

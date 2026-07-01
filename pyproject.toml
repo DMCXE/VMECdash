@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vmecdash"
+version = "0.1.0"
+description = "Dash and VS Code tooling for inspecting VMEC wout NetCDF equilibria"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "plotly>=5.22.0",
+  "numpy>=1.24.0",
+  "xarray>=2024.1.0",
+  "netCDF4>=1.6.5",
+  "jax>=0.4.26",
+  "jaxlib>=0.4.26",
+]
+
+[project.optional-dependencies]
+dash = [
+  "dash>=2.16.1",
+  "dash-mantine-components>=0.14.5",
+  "dash-iconify>=0.1.2",
+]
+dev = [
+  "pytest>=8",
+]
+
+[project.scripts]
+vmecdash = "vmecdash.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["vmecdash*"]
+
+[tool.setuptools.package-data]
+vmecdash = ["py.typed", "dash_app/assets/*.png"]

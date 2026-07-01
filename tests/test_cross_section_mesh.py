@@ -1,4 +1,3 @@
-import importlib.util
 import os
 import sys
 from pathlib import Path
@@ -12,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from vmec_jax import VMECJaxProcessor
+from vmecdash.core import VMECJaxProcessor
 
 
 EXAMPLE_WOUT = "example/wout_PO.nc"
@@ -85,11 +84,8 @@ def test_cross_section_mesh_full_mesh_evaluates_at_nodes():
 
 
 def test_cross_section_field_renderer_builds_carpet():
-    if importlib.util.find_spec("dash_mantine_components") is None:
-        pytest.skip("Dash UI dependencies are required for renderer tests")
-
-    from views.shared import build_theme
-    from views.two_d import render_cross_section_field
+    from vmecdash.renderers.two_d import render_cross_section_field
+    from vmecdash.theme import build_theme
 
     vmec = VMECJaxProcessor.from_file(EXAMPLE_WOUT)
     fig = render_cross_section_field(vmec, 0.0, "modB", "|B| (Mod B)", build_theme(True, 0))
@@ -101,35 +97,37 @@ def test_cross_section_field_renderer_builds_carpet():
 
 
 def test_lambda_cross_section_uses_axis_fill_regularization():
-    if importlib.util.find_spec("dash_mantine_components") is None:
-        pytest.skip("Dash UI dependencies are required for renderer tests")
-
-    from views.shared import build_theme
-    from views.two_d import _carpet_colorscale, _sample_field_color, render_cross_section_field
+    from vmecdash.renderers.two_d import _carpet_colorscale, _sample_field_color, render_cross_section_field
+    from vmecdash.theme import build_theme
 
     vmec = VMECJaxProcessor.from_file(EXAMPLE_WOUT)
-    _, _, val_nodes = vmec.get_cross_section_mesh(0.0, "lambda", res_u=160)
+    _, _, val_nodes = vmec.get_cross_section_mesh(0.0, "lambda", res_u=480)
     colorscale, reversescale, zmin, zmax = _carpet_colorscale(val_nodes)
     axis_value = float(np.nanmean(val_nodes[1, :-1]))
     expected_fill = _sample_field_color(axis_value, colorscale, reversescale, zmin, zmax)
 
     fig = render_cross_section_field(vmec, 0.0, "lambda", "Lambda", build_theme(True, 0))
     trace_types = [trace.type for trace in fig.data]
+    sample_trace = next(trace for trace in fig.data if trace.name == "Lambda samples")
 
-    assert trace_types == ["scatter", "carpet", "contourcarpet", "scatter"]
+    assert trace_types == ["scatter", "scattergl", "scatter"]
+    assert "carpet" not in trace_types
+    assert "contourcarpet" not in trace_types
+    assert not any(trace.name == "Lambda quad fill" for trace in fig.data)
     assert fig.data[0].fill == "toself"
     assert fig.data[0].name == "Axis fill"
     assert fig.data[0].fillcolor == expected_fill
-    assert np.min(np.asarray(fig.data[2].b, dtype=float)) > 0.0
+    assert sample_trace.marker.showscale is True
+    assert sample_trace.marker.cmin == zmin
+    assert sample_trace.marker.cmax == zmax
+    assert sample_trace.marker.size == 6
+    assert len(sample_trace.x) > 0
     assert len(fig.layout.images) == 0
 
 
 def test_modb_cross_section_keeps_degenerate_axis_in_carpet():
-    if importlib.util.find_spec("dash_mantine_components") is None:
-        pytest.skip("Dash UI dependencies are required for renderer tests")
-
-    from views.shared import build_theme
-    from views.two_d import render_cross_section_field
+    from vmecdash.renderers.two_d import render_cross_section_field
+    from vmecdash.theme import build_theme
 
     vmec = VMECJaxProcessor.from_file(EXAMPLE_WOUT)
     fig = render_cross_section_field(vmec, 0.0, "modB", "|B| (Mod B)", build_theme(True, 0))
@@ -140,18 +138,21 @@ def test_modb_cross_section_keeps_degenerate_axis_in_carpet():
     assert np.min(np.asarray(contour.b, dtype=float)) == 0.0
 
 
-def test_ps3_lambda_cross_section_excludes_axis_from_contourcarpet():
-    if importlib.util.find_spec("dash_mantine_components") is None:
-        pytest.skip("Dash UI dependencies are required for renderer tests")
+def test_ps3_lambda_cross_section_uses_sampled_field():
     if not PS3_WOUT.exists():
         pytest.skip("PS3 local smoke fixture is not available")
 
-    from views.shared import build_theme
-    from views.two_d import render_cross_section_field
+    from vmecdash.renderers.two_d import render_cross_section_field
+    from vmecdash.theme import build_theme
 
     vmec = VMECJaxProcessor.from_file(str(PS3_WOUT))
     fig = render_cross_section_field(vmec, 0.0, "lambda", "Lambda", build_theme(True, 0))
-    contour = next(trace for trace in fig.data if trace.type == "contourcarpet")
+    trace_types = [trace.type for trace in fig.data]
+    sample_traces = [trace for trace in fig.data if trace.name == "Lambda samples"]
 
     assert fig.data[0].fill == "toself"
-    assert np.min(np.asarray(contour.b, dtype=float)) > 0.0
+    assert "contourcarpet" not in trace_types
+    assert "carpet" not in trace_types
+    assert not any(trace.name == "Lambda quad fill" for trace in fig.data)
+    assert len(sample_traces) == 1
+    assert len(sample_traces[0].x) > 0

@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src {{cspSource}} data:; style-src {{cspSource}} 'unsafe-inline'; script-src 'nonce-{{nonce}}';" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link href="{{stylesUri}}" rel="stylesheet" />
+    <title>VMECdash Preview</title>
+  </head>
+  <body>
+    <div class="shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 20 20" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.4"><ellipse cx="10" cy="10" rx="8" ry="4.2"/><ellipse cx="10" cy="10" rx="3" ry="1.5"/></svg>
+          </span>
+          <span class="brand-text">
+            <span class="brand-name">VMECdash</span>
+            <span class="brand-sub">Equilibrium Viewer</span>
+          </span>
+        </div>
+        <nav id="nav" class="nav"></nav>
+        <div class="sidebar-foot">
+          <button class="btn-primary" id="exportReport">
+            <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M8 1.8v7.7"/><path d="M5 6.6 8 9.7l3-3.1"/><path d="M2.6 12.6h10.8"/></svg></span>
+            <span>Export Report</span>
+          </button>
+        </div>
+      </aside>
+      <main class="main">
+        <header class="topbar">
+          <h1 id="viewTitle" class="view-title">VMECdash</h1>
+          <span id="status" class="status-pill"></span>
+        </header>
+        <div id="stats" class="stats"></div>
+        <div class="plot-wrap">
+          <div id="plot" class="plot"></div>
+          <div id="loading" class="loading hidden">
+            <span class="spinner" aria-hidden="true"></span>
+            <span>Rendering…</span>
+          </div>
+        </div>
+      </main>
+      <aside class="controls">
+        <div class="controls-head">Controls</div>
+        <div id="controlBody" class="control-body"></div>
+      </aside>
+    </div>
+    <script nonce="{{nonce}}" src="{{plotlyUri}}"></script>
+    <script nonce="{{nonce}}" src="{{scriptUri}}"></script>
+  </body>
+</html>

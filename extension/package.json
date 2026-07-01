@@ -1,0 +1,79 @@
+{
+  "name": "vmecdash-viewer",
+  "displayName": "VMECdash Viewer",
+  "description": "Native VS Code viewer for VMEC wout NetCDF equilibria.",
+  "version": "0.1.0",
+  "publisher": "vmecdash",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Visualization"
+  ],
+  "activationEvents": [
+    "onCustomEditor:vmecdash.woutPreview",
+    "onCommand:vmecdash.openPreview",
+    "onCommand:vmecdash.checkBackend",
+    "onCommand:vmecdash.selectPython"
+  ],
+  "extensionKind": [
+    "workspace"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "customEditors": [
+      {
+        "viewType": "vmecdash.woutPreview",
+        "displayName": "VMECdash Preview",
+        "selector": [
+          {
+            "filenamePattern": "**/wout*.nc"
+          }
+        ],
+        "priority": "option"
+      }
+    ],
+    "commands": [
+      {
+        "command": "vmecdash.openPreview",
+        "title": "VMECdash: Open Preview"
+      },
+      {
+        "command": "vmecdash.checkBackend",
+        "title": "VMECdash: Check Backend"
+      },
+      {
+        "command": "vmecdash.selectPython",
+        "title": "VMECdash: Select Python Path"
+      }
+    ],
+    "configuration": {
+      "title": "VMECdash",
+      "properties": {
+        "vmecdash.pythonPath": {
+          "type": "string",
+          "default": "",
+          "description": "Python executable used to run python -m vmecdash.vscode_backend --stdio."
+        },
+        "vmecdash.backendArgs": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "description": "Additional arguments passed to the VMECdash backend."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.90.0",
+    "typescript": "^5.4.0"
+  }
+}
+

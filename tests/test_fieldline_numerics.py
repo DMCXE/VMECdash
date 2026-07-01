@@ -11,7 +11,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 os.environ.setdefault("MPLCONFIGDIR", os.path.join(tempfile.gettempdir(), "vmecdash-mpl"))
 
-from vmec_jax import VMECJaxProcessor
+from vmecdash.core import VMECJaxProcessor
 
 
 EXAMPLE_WOUT = "example/wout_PO.nc"

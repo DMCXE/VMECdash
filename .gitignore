@@ -1,5 +1,12 @@
-/__pycache__/
-/ui/__pycache__/
-/views/__pycache__/
+# Python
+__pycache__/
+*.pyc
+
 /helper_tools/
+
+# Node / VS Code extension build
+node_modules/
+extension/out/
+
+# macOS
 .DS_Store

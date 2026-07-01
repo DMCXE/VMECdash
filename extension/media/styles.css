@@ -1,0 +1,554 @@
+:root {
+  color-scheme: light dark;
+
+  /* Design tokens layered on VS Code theme variables (theme-correct in light/dark). */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 24px;
+  --radius: 8px;
+  --radius-sm: 5px;
+  --ctl-h: 30px;
+
+  --accent: var(--vscode-button-background, #0e639c);
+  --accent-fg: var(--vscode-button-foreground, #ffffff);
+  --accent-hover: var(--vscode-button-hoverBackground, #1177bb);
+  --border: var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
+  --card-bg: var(--vscode-editorWidget-background, rgba(128, 128, 128, 0.08));
+  --sidebar-bg: var(--vscode-sideBar-background, transparent);
+  --muted: var(--vscode-descriptionForeground, #8a8a8a);
+  --hover: var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.12));
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  color: var(--vscode-foreground);
+  background: var(--vscode-editor-background);
+  font-family: var(--vscode-font-family);
+  font-size: var(--vscode-font-size, 13px);
+}
+
+/* ------------------------------------------------------------------ layout */
+
+.shell {
+  display: grid;
+  grid-template-columns: 240px minmax(0, 1fr) 304px;
+  height: 100vh;
+}
+
+.sidebar,
+.controls {
+  background: var(--sidebar-bg);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.sidebar {
+  border-right: 1px solid var(--border);
+  padding: var(--sp-4) var(--sp-3);
+}
+
+.controls {
+  border-left: 1px solid var(--border);
+}
+
+.main {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+}
+
+/* ------------------------------------------------------------------ brand + nav */
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-1) var(--sp-2) var(--sp-4);
+}
+
+.brand-mark {
+  display: inline-flex;
+  color: var(--accent);
+}
+
+.brand-text {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.15;
+}
+
+.brand-name {
+  font-weight: 700;
+  font-size: 15px;
+  letter-spacing: 0.2px;
+}
+
+.brand-sub {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  overflow-y: auto;
+}
+
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  width: 100%;
+  border: 0;
+  border-radius: var(--radius-sm);
+  padding: var(--sp-2) var(--sp-2);
+  color: var(--vscode-foreground);
+  background: transparent;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  position: relative;
+}
+
+.nav-item:hover {
+  background: var(--hover);
+}
+
+.nav-item.active {
+  background: var(--vscode-list-activeSelectionBackground);
+  color: var(--vscode-list-activeSelectionForeground);
+}
+
+.nav-item.active::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 6px;
+  bottom: 6px;
+  width: 3px;
+  border-radius: 2px;
+  background: var(--accent);
+}
+
+.nav-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  opacity: 0.9;
+}
+
+.nav-label {
+  font-size: 13px;
+}
+
+.sidebar-foot {
+  padding-top: var(--sp-3);
+  border-top: 1px solid var(--border);
+  margin-top: var(--sp-2);
+}
+
+.btn-primary {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+  width: 100%;
+  height: var(--ctl-h);
+  border: 0;
+  border-radius: var(--radius-sm);
+  color: var(--accent-fg);
+  background: var(--accent);
+  font: inherit;
+  cursor: pointer;
+}
+
+.btn-primary:hover {
+  background: var(--accent-hover);
+}
+
+/* ------------------------------------------------------------------ topbar + status */
+
+.topbar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  padding: var(--sp-3) var(--sp-4);
+  border-bottom: 1px solid var(--border);
+}
+
+.view-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.status-pill {
+  font-size: 11px;
+  color: var(--muted);
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.status-pill[data-kind="busy"] {
+  color: var(--vscode-charts-yellow, #d7a300);
+  border-color: currentColor;
+}
+
+.status-pill[data-kind="ok"] {
+  color: var(--vscode-charts-green, #23a559);
+  border-color: color-mix(in srgb, currentColor 45%, transparent);
+}
+
+.status-pill[data-kind="error"] {
+  color: var(--vscode-errorForeground, #f14c4c);
+  border-color: currentColor;
+}
+
+/* ------------------------------------------------------------------ stats */
+
+.stats {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-3) var(--sp-4);
+}
+
+.stats:empty {
+  display: none;
+}
+
+/* KPI cards and detail cards live in separate responsive grids so short and tall cards
+   never share a row (which looked scrambled). Both reflow with width. */
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: var(--sp-2);
+}
+
+.detail-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: var(--sp-2);
+  align-items: start;
+}
+
+.stat,
+.detail {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--sp-3);
+  background: var(--card-bg);
+}
+
+.stat-title {
+  color: var(--muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+
+.stat-value {
+  font-size: 19px;
+  font-weight: 700;
+  margin-top: 2px;
+}
+
+.detail strong {
+  display: block;
+  margin-bottom: var(--sp-1);
+  font-size: 12px;
+}
+
+.detail-row {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  font-size: 12px;
+  padding: 1px 0;
+}
+
+.detail-row .label {
+  color: var(--muted);
+}
+
+/* ------------------------------------------------------------------ plot */
+
+.plot-wrap {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 520px;
+  margin: 0 var(--sp-4) var(--sp-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: var(--vscode-editor-background);
+}
+
+.plot {
+  position: absolute;
+  inset: 0;
+}
+
+.loading {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+  font-size: 12px;
+  color: var(--muted);
+  background: color-mix(in srgb, var(--vscode-editor-background) 62%, transparent);
+  backdrop-filter: blur(1px);
+}
+
+.spinner {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  animation: spin 0.7s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ------------------------------------------------------------------ controls */
+
+.controls-head {
+  padding: var(--sp-4) var(--sp-4) var(--sp-2);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--muted);
+}
+
+.control-body {
+  padding: 0 var(--sp-4) var(--sp-4);
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.control-empty {
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.control {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  margin-bottom: var(--sp-3);
+}
+
+.control-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+/* selects */
+
+.select-wrap {
+  position: relative;
+}
+
+.select-wrap::after {
+  content: "";
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  width: 7px;
+  height: 7px;
+  border-right: 1.5px solid var(--muted);
+  border-bottom: 1.5px solid var(--muted);
+  transform: translateY(-65%) rotate(45deg);
+  pointer-events: none;
+}
+
+select,
+.number {
+  width: 100%;
+  height: var(--ctl-h);
+  box-sizing: border-box;
+  color: var(--vscode-input-foreground);
+  background: var(--vscode-input-background);
+  border: 1px solid var(--vscode-input-border, var(--border));
+  border-radius: var(--radius-sm);
+  padding: 0 var(--sp-2);
+  font: inherit;
+}
+
+select {
+  appearance: none;
+  -webkit-appearance: none;
+  padding-right: 26px;
+  cursor: pointer;
+}
+
+select:focus-visible,
+.number:focus-visible,
+.slider:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder, var(--accent));
+  outline-offset: 1px;
+}
+
+/* sliders */
+
+.control-slider .slider-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.slider {
+  -webkit-appearance: none;
+  appearance: none;
+  flex: 1;
+  height: 4px;
+  border-radius: 3px;
+  background: var(--vscode-scrollbarSlider-background, var(--border));
+  cursor: pointer;
+}
+
+.slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: 2px solid var(--vscode-editor-background);
+  cursor: pointer;
+}
+
+.slider::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: 2px solid var(--vscode-editor-background);
+  cursor: pointer;
+}
+
+.slider-val {
+  min-width: 44px;
+  text-align: right;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--vscode-foreground);
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+}
+
+/* toggle switch */
+
+.control-toggle {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  cursor: pointer;
+}
+
+.toggle {
+  position: relative;
+  display: inline-flex;
+  flex: none;
+}
+
+.toggle input {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.toggle-track {
+  width: 34px;
+  height: 18px;
+  border-radius: 999px;
+  background: var(--vscode-input-background);
+  border: 1px solid var(--vscode-input-border, var(--border));
+  transition: background 0.15s ease;
+}
+
+.toggle-track::after {
+  content: "";
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--muted);
+  transition: transform 0.15s ease, background 0.15s ease;
+}
+
+.toggle input:checked + .toggle-track {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.toggle input:checked + .toggle-track::after {
+  transform: translateX(16px);
+  background: var(--accent-fg);
+}
+
+.toggle input:focus-visible + .toggle-track {
+  outline: 1px solid var(--vscode-focusBorder, var(--accent));
+  outline-offset: 2px;
+}
+
+.hidden {
+  display: none !important;
+}
+
+/* ------------------------------------------------------------------ responsive */
+
+@media (max-width: 1040px) {
+  .shell {
+    grid-template-columns: 210px minmax(0, 1fr);
+  }
+  .controls {
+    grid-column: 1 / -1;
+    border-left: 0;
+    border-top: 1px solid var(--border);
+    max-height: 260px;
+  }
+  .control-body {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 0 var(--sp-4);
+  }
+}

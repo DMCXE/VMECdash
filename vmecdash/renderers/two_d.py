@@ -1,95 +1,10 @@
 from __future__ import annotations
 
 import numpy as np
-import dash_mantine_components as dmc
-from dash import dcc, html
 import plotly.graph_objects as go
 from plotly.colors import sample_colorscale
 
-from ui.components import get_icon
-from views.shared import PlotTheme, make_empty_figure
-
-
-def controls():
-    return dmc.Paper(
-        id="wrapper-2d",
-        withBorder=True,
-        shadow="xs",
-        radius="md",
-        p="md",
-        style={"display": "none"},
-        children=[
-            dmc.Text("Configure cross section or flux-surface renderings.", size="sm", c="dimmed", mb="sm"),
-            dmc.Select(
-                id="ctrl-2d-type",
-                label="Plot Type",
-                value="cross_section",
-                data=[
-                    {"value": "cross_section", "label": "Cross Section (R-Z)"},
-                    {"value": "flux_surface", "label": "Flux Surface (u-v)"},
-                ],
-                mb="md",
-                allowDeselect=False,
-            ),
-            dmc.Select(id="ctrl-2d-var", label="Color Variable", value="geometry", data=[], mb="md", allowDeselect=False),
-            dmc.Stack(
-                [
-                    dmc.Text("Toroidal Angle (Phi)", size="sm", fw=500),
-                    dmc.Group(
-                        [
-                            dmc.ActionIcon(get_icon("mdi:minus"), id="btn-phi-dec", variant="light", color="gray", size="lg"),
-                            html.Div(
-                                dcc.Slider(
-                                    id="ctrl-phi",
-                                    min=0,
-                                    max=1,
-                                    step=0.01,
-                                    value=0,
-                                    marks={0: "0", 0.5: "π", 1: "2π/N"},
-                                    tooltip={"placement": "bottom"},
-                                    updatemode="drag",
-                                ),
-                                style={"flexGrow": 1},
-                            ),
-                            dmc.ActionIcon(get_icon("mdi:plus"), id="btn-phi-inc", variant="light", color="gray", size="lg"),
-                        ],
-                        gap="xs",
-                    ),
-                    dmc.Text("Flux Surface Index (s)", size="sm", fw=500, mt="sm"),
-                    dmc.Group(
-                        [
-                            dmc.ActionIcon(get_icon("mdi:minus"), id="btn-s-dec", variant="light", color="gray", size="lg"),
-                            html.Div(
-                                dcc.Slider(
-                                    id="ctrl-s-idx",
-                                    min=0,
-                                    max=10,
-                                    step=1,
-                                    value=10,
-                                    marks={0: "Axis", 10: "Edge"},
-                                    tooltip={"placement": "bottom"},
-                                    updatemode="drag",
-                                ),
-                                style={"flexGrow": 1},
-                            ),
-                            dmc.ActionIcon(get_icon("mdi:plus"), id="btn-s-inc", variant="light", color="gray", size="lg"),
-                        ],
-                        gap="xs",
-                    ),
-                    dmc.Group(
-                        [
-                            dmc.Text("Visible Surfaces (Count):", size="sm"),
-                            dmc.NumberInput(id="ctrl-geo-stride", value=15, min=1, max=200, step=1, w=80),
-                        ],
-                        id="group-geo-stride",
-                        style={"display": "none"},
-                        mt="sm",
-                    ),
-                ],
-                gap="xs",
-            ),
-        ],
-    )
+from vmecdash.theme import PlotTheme, make_empty_figure
 
 
 def build_geometry_cross_section_figure(vmec, phi_angle, s_idx, geo_count, dark_mode, fig_template, paper_bg, plot_bg, reset_seed):
@@ -110,7 +25,7 @@ def build_geometry_cross_section_figure(vmec, phi_angle, s_idx, geo_count, dark_
         color = sel_color if s_i == s_idx else ghost_color
         width = 3 if s_i == s_idx else 1
         fig.add_trace(go.Scatter(x=r_l, y=z_l, mode="lines", line=dict(color=color, width=width), hoverinfo="skip"))
-    fig.update_layout(title=f"Flux Surfaces @ φ={phi_angle:.2f} rad")
+    fig.update_layout(title=f"Flux Surfaces @ phi={phi_angle:.2f} rad")
     fig.update_xaxes(title="R [m]")
     fig.update_yaxes(title="Z [m]", scaleanchor="x", scaleratio=1)
     fig.update_layout(template=fig_template, paper_bgcolor=paper_bg, plot_bgcolor=plot_bg, uirevision=f"2d-{reset_seed}", showlegend=False)
@@ -118,11 +33,6 @@ def build_geometry_cross_section_figure(vmec, phi_angle, s_idx, geo_count, dark_
 
 
 def _carpet_colorscale(values: np.ndarray):
-    """Return (colorscale, reversescale, zmin, zmax) mirroring the old cmap logic.
-
-    Diverging fields (min < 0 < max) use a zero-centred reversed RdBu (negative = blue,
-    positive = red); everything else uses Viridis to match the rest of the dashboard.
-    """
     finite = values[np.isfinite(values)]
     if finite.size == 0:
         return "Viridis", False, 0.0, 1.0
@@ -230,7 +140,6 @@ def _add_carpet_contour(fig: go.Figure, r_nodes, z_nodes, val_nodes, colorscale,
     n_s, n_theta = val_nodes.shape
     theta_vals = np.linspace(0.0, 2.0 * np.pi, n_theta)
     s_vals = np.linspace(0.0, 1.0, n_s)
-    # Flatten the (s, theta) node lattice pointwise: theta varies fastest, s per row.
     a_flat = np.tile(theta_vals, n_s)
     b_flat = np.repeat(s_vals, n_theta)
     x_flat = r_nodes.reshape(-1)
@@ -274,13 +183,12 @@ def render_cross_section_field(vmec, phi_angle: float, var_name: str, field_labe
     else:
         _add_carpet_contour(fig, r_nodes, z_nodes, val_nodes, colorscale, reversescale, zmin, zmax, field_label)
 
-    # Crisp outline of the last closed flux surface (already a closed loop in theta).
     _add_lcfs_outline(fig, r_nodes, z_nodes, lcfs_color)
 
     fig.update_xaxes(title="R [m]")
     fig.update_yaxes(title="Z [m]", scaleanchor="x", scaleratio=1)
     fig.update_layout(
-        title=f"{field_label} on Cross-Section at φ={phi_angle:.2f} rad",
+        title=f"{field_label} on Cross-Section at phi={phi_angle:.2f} rad",
         template=theme.fig_template,
         paper_bgcolor=theme.paper_bg,
         plot_bgcolor=theme.plot_bg,
@@ -320,3 +228,4 @@ def render_flux_surface(vmec, s_idx: int, var_name: str, field_label: str, theme
         uirevision=f"2d-{theme.reset_seed}",
     )
     return fig
+
