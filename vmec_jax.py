@@ -11,8 +11,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import xarray as xr
-from matplotlib.path import Path
-from scipy.interpolate import griddata
 
 # Enable double precision for stellarator equilibria
 jax.config.update("jax_enable_x64", True)
@@ -127,6 +125,8 @@ FIELD_SPECS: Mapping[str, FieldSpec] = {
     "j^v": FieldSpec("j^v", "j^v", "currvmnc", sin_source="currvmns", category="Current"),
 }
 
+HALF_MESH_FIELD_KEYS = frozenset({"modB", "jacobian", "lambda", "B_u", "B_v", "B^u", "B^v"})
+
 
 def _load_coefficients(ds: xr.Dataset, specs: Mapping[str, FieldSpec | ProfileSpec]) -> dict:
     arrays = {}
@@ -170,6 +170,89 @@ def _grad_uniform(y: jnp.ndarray, ds: float) -> jnp.ndarray:
     dy = dy.at[0].set((y[1] - y[0]) / ds)
     dy = dy.at[-1].set((y[-1] - y[-2]) / ds)
     return dy
+
+
+def _linear_interp_extrap_weights(x: np.ndarray, x_new: np.ndarray) -> np.ndarray:
+    """Linear interpolation/extrapolation weights for small radial grids."""
+    x = np.asarray(x, dtype=float)
+    x_new = np.asarray(x_new, dtype=float)
+    weights = np.zeros((x_new.size, x.size), dtype=float)
+    if x.size == 0:
+        return weights
+    if x.size == 1:
+        weights[:, 0] = 1.0
+        return weights
+
+    for row, target in enumerate(x_new):
+        idx = int(np.searchsorted(x, target, side="right") - 1)
+        idx = int(np.clip(idx, 0, x.size - 2))
+        denom = x[idx + 1] - x[idx]
+        frac = (target - x[idx]) / denom
+        weights[row, idx] = 1.0 - frac
+        weights[row, idx + 1] = frac
+    return weights
+
+
+def _not_a_knot_cubic_weights(x: np.ndarray, x_new: np.ndarray) -> np.ndarray:
+    """Cubic not-a-knot interpolation/extrapolation weights.
+
+    This mirrors the boundary convention used by SciPy/FITPACK's cubic
+    interpolating spline while keeping VMECdash free of a SciPy dependency.
+    """
+    x = np.asarray(x, dtype=float)
+    x_new = np.asarray(x_new, dtype=float)
+    n = x.size
+    if n < 4:
+        return _linear_interp_extrap_weights(x, x_new)
+
+    h = np.diff(x)
+    lhs = np.zeros((n, n), dtype=float)
+    rhs = np.zeros((n, n), dtype=float)
+
+    lhs[0, 0] = -h[1]
+    lhs[0, 1] = h[0] + h[1]
+    lhs[0, 2] = -h[0]
+
+    for i in range(1, n - 1):
+        lhs[i, i - 1] = h[i - 1]
+        lhs[i, i] = 2.0 * (h[i - 1] + h[i])
+        lhs[i, i + 1] = h[i]
+        rhs[i, i - 1] = 6.0 / h[i - 1]
+        rhs[i, i] = -6.0 * (1.0 / h[i - 1] + 1.0 / h[i])
+        rhs[i, i + 1] = 6.0 / h[i]
+
+    lhs[-1, -3] = -h[-1]
+    lhs[-1, -2] = h[-2] + h[-1]
+    lhs[-1, -1] = -h[-2]
+
+    second_deriv_weights = np.linalg.solve(lhs, rhs)
+    weights = np.zeros((x_new.size, n), dtype=float)
+    for row, target in enumerate(x_new):
+        idx = int(np.searchsorted(x, target, side="right") - 1)
+        idx = int(np.clip(idx, 0, n - 2))
+        width = x[idx + 1] - x[idx]
+        a = (x[idx + 1] - target) / width
+        b = (target - x[idx]) / width
+        weights[row, idx] += a
+        weights[row, idx + 1] += b
+        weights[row] += ((a**3 - a) * second_deriv_weights[idx] + (b**3 - b) * second_deriv_weights[idx + 1]) * (
+            width**2
+        ) / 6.0
+    return weights
+
+
+def _collapse_axis_node_values(values: np.ndarray) -> np.ndarray:
+    """Make the degenerate magnetic-axis node single-valued for carpet plots."""
+    values = np.asarray(values)
+    if values.ndim != 2 or values.shape[0] == 0 or values.shape[1] == 0:
+        return values
+
+    collapsed = values.copy()
+    samples = collapsed[0, :-1] if collapsed.shape[1] > 1 else collapsed[0]
+    finite = samples[np.isfinite(samples)]
+    axis_value = float(np.mean(finite)) if finite.size else float(np.mean(samples))
+    collapsed[0, :] = axis_value
+    return collapsed
 
 
 def compute_magnetic_well_profile(
@@ -288,7 +371,7 @@ class VmecPostProcessor:
         self._field_alias = {spec.label: key for key, spec in FIELD_SPECS.items()}
         self._computed_alias = {spec.label: key for key, spec in COMPUTED_PROFILE_SPECS.items()}
         self._theta_cache: dict[int, jnp.ndarray] = {}
-        self._lcfs_cache: dict[tuple[float, int], tuple[jnp.ndarray, jnp.ndarray]] = {}
+        self._half_to_full_weights: np.ndarray | None = None
         self._closed = False
 
     def close(self) -> None:
@@ -325,6 +408,28 @@ class VmecPostProcessor:
             sin = jnp.zeros_like(cos)
         return cos, sin
 
+    def _lambda_pair(self) -> tuple[jnp.ndarray, jnp.ndarray] | None:
+        lmns = jnp.asarray(self.ds["lmns"].values) if "lmns" in self.ds else None
+        lmnc = jnp.asarray(self.ds["lmnc"].values) if "lmnc" in self.ds else None
+        if lmnc is None and lmns is None:
+            return None
+        if lmns is None:
+            lmns = jnp.zeros_like(lmnc)
+        if lmnc is None or not self.lasym:
+            lmnc = jnp.zeros_like(lmns)
+        return lmnc, lmns
+
+    def _sine_symmetric_pair(self, cos_name: str, sin_name: str) -> tuple[jnp.ndarray, jnp.ndarray] | None:
+        sin = jnp.asarray(self.ds[sin_name].values) if sin_name in self.ds else None
+        cos = jnp.asarray(self.ds[cos_name].values) if cos_name in self.ds else None
+        if cos is None and sin is None:
+            return None
+        if sin is None:
+            sin = jnp.zeros_like(cos)
+        if cos is None or not self.lasym:
+            cos = jnp.zeros_like(sin)
+        return cos, sin
+
     def _load_field_pairs(self) -> None:
         for key, spec in FIELD_SPECS.items():
             if key == "geometry":
@@ -346,11 +451,29 @@ class VmecPostProcessor:
             s_idx += self.ns
         return int(jnp.clip(s_idx, 0, self.ns - 1))
 
+    def _sanitize_half_s(self, s_idx: int) -> int:
+        if s_idx < 0:
+            s_idx += self.ns
+        upper = self.ns - 1
+        lower = 1 if upper >= 1 else 0
+        return int(jnp.clip(s_idx, lower, upper))
+
     def _sample_s_indices(self, res_s: int) -> jnp.ndarray:
         if res_s >= self.ns:
             return jnp.arange(self.ns, dtype=int)
         raw = jnp.linspace(0, self.ns - 1, res_s)
         return jnp.unique(jnp.asarray(jnp.round(raw), dtype=int))
+
+    def _half_to_full_radial_weights(self) -> np.ndarray:
+        if self._half_to_full_weights is None:
+            full_s = np.linspace(0.0, 1.0, self.ns)
+            if self.ns <= 1:
+                self._half_to_full_weights = np.ones((self.ns, self.ns), dtype=float)
+            else:
+                ds = 1.0 / (self.ns - 1)
+                half_s = full_s[1:] - 0.5 * ds
+                self._half_to_full_weights = _not_a_knot_cubic_weights(half_s, full_s)
+        return self._half_to_full_weights
 
     def _profile_key(self, var_name: str) -> str:
         return self._profile_alias.get(var_name, var_name)
@@ -513,7 +636,12 @@ class VmecPostProcessor:
             if r_pair is None or z_pair is None:
                 return None
             return {"key": key, "label": spec.label, "r_pair": r_pair, "z_pair": z_pair}
-        pair = self._field_pairs.get(key)
+        if key == "lambda":
+            pair = self._lambda_pair()
+        elif key == "B_s":
+            pair = self._sine_symmetric_pair("bsubsmnc", "bsubsmns")
+        else:
+            pair = self._field_pairs.get(key)
         if pair is None:
             return None
         cos_coeffs, _ = pair
@@ -565,36 +693,48 @@ class VmecPostProcessor:
             val_grid = _jit_evaluate_line_pair(cos_slice, sin_slice, payload["xm"], payload["xn"], theta, phi)
         return np.asarray(r_grid), np.asarray(z_grid), np.asarray(val_grid)
 
-    def _lcfs(self, phi: float, resolution: int = 256):
-        key = (float(phi), resolution)
-        if key not in self._lcfs_cache:
-            theta = self._get_theta(resolution)
-            r, z = _jit_cross_section_batch(
-                self.rmnc[-1], self.rmns[-1], self.zmns[-1], self.zmnc[-1], self.xm, self.xn, theta, phi
-            )
-            self._lcfs_cache[key] = (r.reshape(-1), z.reshape(-1))
-        return self._lcfs_cache[key]
+    def get_cross_section_mesh(self, phi: float, var_name: str, res_u: int = 240):
+        """Curvilinear ``(s, theta)`` node mesh with the field co-located at every node.
 
-    def get_cross_section_grid(self, phi: float, var_name: str, res_grid: int = 200):
-        r_raw, z_raw, val_raw = self.get_cross_section_data(phi, var_name)
-        r_lcfs, z_lcfs = self._lcfs(phi)
-        points = np.column_stack((np.asarray(r_raw).reshape(-1), np.asarray(z_raw).reshape(-1)))
-        values = np.asarray(val_raw).reshape(-1)
-        r_min, r_max = float(jnp.min(r_lcfs)), float(jnp.max(r_lcfs))
-        z_min, z_max = float(jnp.min(z_lcfs)), float(jnp.max(z_lcfs))
-        pad_r = (r_max - r_min) * 0.05
-        pad_z = (z_max - z_min) * 0.05
-        r_lin = jnp.linspace(r_min - pad_r, r_max + pad_r, res_grid)
-        z_lin = jnp.linspace(z_min - pad_z, z_max + pad_z, res_grid)
-        r_mesh, z_mesh = jnp.meshgrid(r_lin, z_lin)
-        r_mesh_np = np.asarray(r_mesh)
-        z_mesh_np = np.asarray(z_mesh)
-        val_grid = griddata(points, values, (r_mesh_np, z_mesh_np), method="linear")
-        lcfs_poly = np.column_stack((np.asarray(r_lcfs), np.asarray(z_lcfs)))
-        mask = Path(lcfs_poly).contains_points(np.column_stack((r_mesh_np.ravel(), z_mesh_np.ravel())))
-        mask = mask.reshape(r_mesh_np.shape)
-        val_grid[~mask] = np.nan
-        return np.asarray(r_lin), np.asarray(z_lin), val_grid
+        Returns ``(r_nodes, z_nodes, val_nodes)``, each shaped ``(ns, res_u + 1)``, so the
+        data can be handed straight to a Plotly carpet contour. The outer ``s = 1`` ring is
+        the exact LCFS, giving a clean boundary with no resampling onto a rectangular grid.
+        """
+        payload = self._field_payload(var_name)
+        if payload is None or payload.get("pair") is None or payload.get("key") == "geometry":
+            return None, None, None
+
+        theta_nodes = jnp.linspace(0.0, 2 * jnp.pi, res_u + 1)
+        r_nodes, z_nodes = _jit_cross_section_batch(
+            self.rmnc,
+            self.rmns,
+            self.zmns,
+            self.zmnc,
+            self.xm,
+            self.xn,
+            theta_nodes,
+            phi,
+        )
+
+        cos_coeffs, sin_coeffs = payload["pair"]
+        if payload["key"] in HALF_MESH_FIELD_KEYS:
+            if cos_coeffs.shape[0] == self.ns:
+                cos_coeffs = cos_coeffs[1:self.ns]
+                sin_coeffs = sin_coeffs[1:self.ns]
+            else:
+                cos_coeffs = cos_coeffs[: self.ns - 1]
+                sin_coeffs = sin_coeffs[: self.ns - 1]
+            half_values = np.asarray(
+                _jit_evaluate_line_pair(cos_coeffs, sin_coeffs, payload["xm"], payload["xn"], theta_nodes, phi)
+            )
+            val_nodes = self._half_to_full_radial_weights() @ half_values
+        else:
+            val_nodes = np.array(
+                _jit_evaluate_line_pair(cos_coeffs, sin_coeffs, payload["xm"], payload["xn"], theta_nodes, phi)
+            )
+        val_nodes = _collapse_axis_node_values(val_nodes)
+
+        return np.asarray(r_nodes), np.asarray(z_nodes), np.asarray(val_nodes)
 
     # ---- 3D geometry ------------------------------------------------------
     def compute_3d_surface(self, s_idx: int = -1, var_name: str = "modB", resolution: int = 128):
@@ -643,14 +783,17 @@ class VmecPostProcessor:
         If ``single_line`` is True, compute one field line over ``n_transits``.
         Otherwise compute a grid of alpha values on a single toroidal period.
         """
-        idx = self._sanitize_s(s_idx)
-        lambda_pair = self._coeff_pair("lmnc", "lmns")
+        idx = self._sanitize_half_s(s_idx)
+        lambda_pair = self._lambda_pair()
         b_pair = self._coeff_pair("bmnc", "bmns")
         if lambda_pair is None or b_pair is None:
             return None, None, None
         lmnc, lmns = lambda_pair
         bmnc, bmns = b_pair
-        iota = self._profile_arrays.get("iotaf")[idx]
+        iota_arr = jnp.asarray(self.ds["iotas"].values) if "iotas" in self.ds else self._profile_arrays.get("iotaf")
+        if iota_arr is None:
+            return None, None, None
+        iota = iota_arr[idx]
 
         xm_l = self.xm if lmnc.shape[-1] == self.xm.shape[0] else self.xm_nyq
         xn_l = self.xn if lmnc.shape[-1] == self.xn.shape[0] else self.xn_nyq

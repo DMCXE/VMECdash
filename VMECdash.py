@@ -69,7 +69,6 @@ app.layout = dmc.MantineProvider(
         dcc.Store(id='stored-filepath'),
         dcc.Store(id='vmec-meta'),
         dcc.Store(id='current-view', data='overview'),
-        dcc.Store(id='store-2d-data'),
         dcc.Store(id='resize-ping'),
         dcc.Download(id='download-report'),
 
@@ -366,6 +365,8 @@ def update_controls(meta):
     ns = meta.get('ns', 2)
     max_s = max(0, ns - 1)
     marks = {0: 'Axis', max_s: 'Edge'}
+    fl_min_s = 1 if max_s >= 1 else 0
+    fl_marks = {fl_min_s: 'Near axis' if fl_min_s else 'Axis', max_s: 'Edge'}
     
     return (
         profile_radios, 
@@ -373,38 +374,17 @@ def update_controls(meta):
         fields, 
         max_s, marks, max_s, 
         max_s, marks, max_s,
-        max_s, marks, max_s
+        max_s, fl_marks, max_s
     )
-
-
-@app.callback(
-    Output('store-2d-data', 'data'),
-    [Input('current-view', 'data'),
-     Input('ctrl-2d-type', 'value'),
-     Input('ctrl-2d-var', 'value'),
-     Input('stored-filepath', 'data')],
-    prevent_initial_call=True
-)
-def precompute_2d_slices(view, type_2d, var_2d, filepath):
-    if view != '2d' or type_2d != 'cross_section' or not filepath or var_2d == 'geometry':
-        return None
-    try:
-        vmec = VMECJaxProcessor.from_file(filepath)
-        frames = two_d.precompute_frames(vmec, var_2d)
-        return frames
-    except Exception as exc:
-        print(f"Precompute error: {exc}")
-        return dash.no_update
 
 
 @app.callback(
     [Output('ctrl-phi', 'disabled'),
      Output('group-geo-stride', 'style')],
     Input('ctrl-2d-type', 'value'),
-    Input('ctrl-2d-var', 'value'),
-    Input('store-2d-data', 'data')
+    Input('ctrl-2d-var', 'value')
 )
-def toggle_phi_slider(type_2d, var_name, data_store):
+def toggle_phi_slider(type_2d, var_name):
     is_cross = (type_2d == 'cross_section')
     is_geo = (var_name == 'geometry')
     stride_style = {"display": "flex"} if (is_cross and is_geo) else {"display": "none"}
@@ -588,7 +568,8 @@ def update_visualization(view, filepath, var_1d, type_2d, var_2d, s_2d, var_3d, 
                         vmec, phi_angle, s_idx, geo_count, dark_mode, theme.fig_template, theme.paper_bg, theme.plot_bg, reset_seed
                     )
                     return fig, base_cards
-                return dash.no_update, base_cards
+                fig = two_d.render_cross_section_field(vmec, phi_angle, var_2d, field_label, theme)
+                return fig, base_cards
 
             fig = two_d.render_flux_surface(vmec, s_idx, var_2d, field_label, theme)
             return fig, base_cards
@@ -645,77 +626,9 @@ def toggle_download_button(filepath):
     return not bool(filepath)
 
 
-
-app.clientside_callback(
-    """
-    function(phi_val, data_store, view, type_2d, var_2d) {
-        if (phi_val === undefined || phi_val === null) {
-            return window.dash_clientside.no_update;
-        }
-        if (view !== '2d' || type_2d !== 'cross_section' || var_2d === 'geometry') {
-            return window.dash_clientside.no_update;
-        }
-        if (!data_store || !data_store.frames || !data_store.frames.length) {
-            return window.dash_clientside.no_update;
-        }
-        if (!data_store.var_key || data_store.var_key !== var_2d) {
-            return window.dash_clientside.no_update;
-        }
-        try {
-            var total = data_store.frames.length;
-            var idx = Math.round(phi_val * (total - 1));
-            if (idx < 0) idx = 0;
-            if (idx >= total) idx = total - 1;
-            var frame = data_store.frames[idx];
-            if (!frame || !frame.r || !frame.z || !frame.val) {
-                return window.dash_clientside.no_update;
-            }
-            var displayLabel = data_store.var_label || data_store.var_key || 'Field';
-            var fig_data = {
-                type: 'contour',
-                x: frame.r,
-                y: frame.z,
-                z: frame.val,
-                colorscale: 'RdBu',
-                colorbar: {title: displayLabel},
-                contours: {coloring: 'heatmap'},
-                ncontours: 50,
-                line: {width: 0}
-            };
-            var layout = {
-                title: displayLabel + ' on Cross-Section at φ=' + phi_val.toFixed(2),
-                xaxis: {title: 'R [m]'},
-                yaxis: {title: 'Z [m]', scaleanchor: 'x', scaleratio: 1},
-                template: 'plotly_dark'
-            };
-            return {data: [fig_data], layout: layout};
-        } catch (e) {
-            console.error('Clientside callback error:', e);
-            return window.dash_clientside.no_update;
-        }
-    }
-    """,
-    Output('main-graph', 'figure', allow_duplicate=True),
-    Input('ctrl-phi', 'value'),
-    Input('store-2d-data', 'data'),
-    State('current-view', 'data'),
-    State('ctrl-2d-type', 'value'),
-    State('ctrl-2d-var', 'value'),
-    prevent_initial_call=True
-)
-
-
 app.clientside_callback(
     """
     function(var_name, view, type_2d) {
-        if (view === '2d' && type_2d === 'cross_section' && var_name !== 'geometry') {
-            return [
-                false,
-                'Calculating ' + var_name + '...',
-                'blue',
-                {'height': 'calc(100vh - 204px)', 'opacity': 0.3, 'transition': 'opacity 0.5s'}
-            ];
-        }
         return [
             true,
             'Ready',
@@ -731,30 +644,6 @@ app.clientside_callback(
     Input('ctrl-2d-var', 'value'),
     Input('current-view', 'data'),
     Input('ctrl-2d-type', 'value'),
-    prevent_initial_call=True
-)
-
-
-app.clientside_callback(
-    """
-    function(data, var_name) {
-        if (data && data.var_key === var_name) {
-            return [
-                false,
-                'Rendered: ' + (data.var_label || var_name),
-                'green',
-                {'height': 'calc(100vh - 204px)', 'opacity': 1, 'transition': 'opacity 0.5s'}
-            ];
-        }
-        return window.dash_clientside.no_update;
-    }
-    """,
-    Output('status-alert', 'hide', allow_duplicate=True),
-    Output('status-alert', 'children', allow_duplicate=True),
-    Output('status-alert', 'color', allow_duplicate=True),
-    Output('main-graph', 'style', allow_duplicate=True),
-    Input('store-2d-data', 'data'),
-    State('ctrl-2d-var', 'value'),
     prevent_initial_call=True
 )
 
@@ -818,8 +707,8 @@ app.clientside_callback(
     State('toggle-theme', 'checked'),
     prevent_initial_call=True
 )
-def update_geometry_phi(phi_val, view, type_2d, var_2d, s_idx, geo_count, filepath, dark_mode):
-    if not (filepath and view == '2d' and type_2d == 'cross_section' and var_2d == 'geometry'):
+def update_cross_section_phi(phi_val, view, type_2d, var_2d, s_idx, geo_count, filepath, dark_mode):
+    if not (filepath and view == '2d' and type_2d == 'cross_section'):
         return dash.no_update
     phi_val = phi_val or 0.0
     try:
@@ -829,12 +718,16 @@ def update_geometry_phi(phi_val, view, type_2d, var_2d, s_idx, geo_count, filepa
         s_idx = int(s_idx) if s_idx is not None else vmec.ns - 1
         dark_mode = True if dark_mode is None else bool(dark_mode)
         theme = build_theme(dark_mode, 0)
-        fig = two_d.build_geometry_cross_section_figure(
-            vmec, phi_angle, s_idx, geo_count, dark_mode, theme.fig_template, theme.paper_bg, theme.plot_bg, reset_seed=0
-        )
-        return fig
+        if var_2d == 'geometry':
+            fig = two_d.build_geometry_cross_section_figure(
+                vmec, phi_angle, s_idx, geo_count, dark_mode, theme.fig_template, theme.paper_bg, theme.plot_bg, reset_seed=0
+            )
+            return fig
+        field_map = {opt["value"]: opt.get("label", opt["value"]) for opt in vmec.available_fields()}
+        field_label = field_map.get(var_2d, var_2d)
+        return two_d.render_cross_section_field(vmec, phi_angle, var_2d, field_label, theme)
     except Exception as exc:
-        print(f"Geometry phi update error: {exc}")
+        print(f"Cross-section phi update error: {exc}")
         return dash.no_update
 
 # 额外的按钮回调

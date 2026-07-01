@@ -37,11 +37,11 @@ def controls():
                     dmc.Text("Flux Surface (s)", size="sm", fw=500),
                     dcc.Slider(
                         id="ctrl-fl-s-idx",
-                        min=0,
+                        min=1,
                         max=10,
                         step=1,
                         value=10,
-                        marks={0: "Axis", 10: "Edge"},
+                        marks={1: "Near axis", 10: "Edge"},
                         tooltip={"placement": "bottom"},
                     ),
                     dmc.Group(

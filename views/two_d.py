@@ -4,9 +4,10 @@ import numpy as np
 import dash_mantine_components as dmc
 from dash import dcc, html
 import plotly.graph_objects as go
+from plotly.colors import sample_colorscale
 
 from ui.components import get_icon
-from views.shared import PlotTheme
+from views.shared import PlotTheme, make_empty_figure
 
 
 def controls():
@@ -116,6 +117,125 @@ def build_geometry_cross_section_figure(vmec, phi_angle, s_idx, geo_count, dark_
     return fig
 
 
+def _carpet_colorscale(values: np.ndarray):
+    """Return (colorscale, reversescale, zmin, zmax) mirroring the old cmap logic.
+
+    Diverging fields (min < 0 < max) use a zero-centred reversed RdBu (negative = blue,
+    positive = red); everything else uses Viridis to match the rest of the dashboard.
+    """
+    finite = values[np.isfinite(values)]
+    if finite.size == 0:
+        return "Viridis", False, 0.0, 1.0
+    vmin = float(np.min(finite))
+    vmax = float(np.max(finite))
+    if vmin < 0.0 < vmax:
+        bound = max(abs(vmin), abs(vmax))
+        return "RdBu", True, -bound, bound
+    if np.isclose(vmin, vmax):
+        pad = max(abs(vmin) * 0.01, 1e-9)
+        vmin -= pad
+        vmax += pad
+    return "Viridis", False, vmin, vmax
+
+
+def _sample_field_color(value: float, colorscale, reversescale: bool, zmin: float, zmax: float) -> str:
+    if not np.isfinite(value) or np.isclose(zmin, zmax):
+        level = 0.5
+    else:
+        level = float(np.clip((value - zmin) / (zmax - zmin), 0.0, 1.0))
+    if reversescale:
+        level = 1.0 - level
+    return sample_colorscale(colorscale, [level])[0]
+
+
+def render_cross_section_field(vmec, phi_angle: float, var_name: str, field_label: str, theme: PlotTheme):
+    r_nodes, z_nodes, val_nodes = vmec.get_cross_section_mesh(phi_angle, var_name, res_u=160)
+    if r_nodes is None or z_nodes is None or val_nodes is None:
+        return make_empty_figure(theme, f"No cross-section data for {field_label}")
+
+    use_axis_fill = var_name == "lambda" and val_nodes.shape[0] > 1
+    carpet_r = r_nodes[1:] if use_axis_fill else r_nodes
+    carpet_z = z_nodes[1:] if use_axis_fill else z_nodes
+    carpet_values = val_nodes[1:] if use_axis_fill else val_nodes
+
+    n_s, n_theta = carpet_values.shape
+    theta_vals = np.linspace(0.0, 2.0 * np.pi, n_theta)
+    if use_axis_fill:
+        s_vals = np.linspace(1.0 / (val_nodes.shape[0] - 1), 1.0, n_s)
+    else:
+        s_vals = np.linspace(0.0, 1.0, n_s)
+    # Flatten the (s, theta) node lattice pointwise: theta varies fastest, s per row.
+    a_flat = np.tile(theta_vals, n_s)
+    b_flat = np.repeat(s_vals, n_theta)
+    x_flat = carpet_r.reshape(-1)
+    y_flat = carpet_z.reshape(-1)
+    z_flat = carpet_values.reshape(-1)
+
+    colorscale, reversescale, zmin, zmax = _carpet_colorscale(val_nodes)
+    step = (zmax - zmin) / 40.0
+    lcfs_color = "#f8f9fa" if theme.dark_mode else "#212529"
+    carpet_id = "cross-section"
+    hidden_axis = dict(showgrid=False, showticklabels="none", showline=False, startline=False, endline=False, smoothing=0)
+
+    fig = go.Figure()
+    if use_axis_fill:
+        axis_value = float(np.nanmean(val_nodes[1, :-1]))
+        fill_color = _sample_field_color(axis_value, colorscale, reversescale, zmin, zmax)
+        fig.add_trace(
+            go.Scatter(
+                x=r_nodes[1],
+                y=z_nodes[1],
+                mode="lines",
+                fill="toself",
+                fillcolor=fill_color,
+                line=dict(color=fill_color, width=0),
+                hoverinfo="skip",
+                showlegend=False,
+                name="Axis fill",
+            )
+        )
+    fig.add_trace(
+        go.Carpet(carpet=carpet_id, a=a_flat, b=b_flat, x=x_flat, y=y_flat, aaxis=hidden_axis, baxis=hidden_axis)
+    )
+    fig.add_trace(
+        go.Contourcarpet(
+            carpet=carpet_id,
+            a=a_flat,
+            b=b_flat,
+            z=z_flat,
+            colorscale=colorscale,
+            reversescale=reversescale,
+            contours=dict(start=zmin, end=zmax, size=step, coloring="fill"),
+            line=dict(width=0),
+            colorbar=dict(title=field_label),
+        )
+    )
+    # Crisp outline of the last closed flux surface (already a closed loop in theta).
+    fig.add_trace(
+        go.Scatter(
+            x=r_nodes[-1],
+            y=z_nodes[-1],
+            mode="lines",
+            line=dict(color=lcfs_color, width=1.2),
+            hoverinfo="skip",
+            showlegend=False,
+        )
+    )
+
+    fig.update_xaxes(title="R [m]")
+    fig.update_yaxes(title="Z [m]", scaleanchor="x", scaleratio=1)
+    fig.update_layout(
+        title=f"{field_label} on Cross-Section at φ={phi_angle:.2f} rad",
+        template=theme.fig_template,
+        paper_bgcolor=theme.paper_bg,
+        plot_bgcolor=theme.plot_bg,
+        margin=dict(l=0, r=0, t=40, b=0),
+        showlegend=False,
+        uirevision=f"2d-cross-{theme.reset_seed}-{var_name}",
+    )
+    return fig
+
+
 def render_flux_surface(vmec, s_idx: int, var_name: str, field_label: str, theme: PlotTheme):
     theta, zeta, val = vmec.get_flux_surface_data(s_idx, var_name, res_u=128, res_v=128)
     fig = go.Figure()
@@ -145,20 +265,3 @@ def render_flux_surface(vmec, s_idx: int, var_name: str, field_label: str, theme
         uirevision=f"2d-{theme.reset_seed}",
     )
     return fig
-
-
-def precompute_frames(vmec, var_name: str):
-    field_lookup = {opt["value"]: opt.get("label", opt["value"]) for opt in vmec.available_fields()}
-    field_label = field_lookup.get(var_name, var_name)
-    frames = []
-    steps = np.linspace(0, 1, 21)
-    for phi_frac in steps:
-        phi = phi_frac * 2 * np.pi / vmec.nfp
-        r, z, val = vmec.get_cross_section_grid(phi, var_name, res_grid=140)
-        if r is None or z is None or val is None:
-            continue
-        frames.append({"r": r.tolist(), "z": z.tolist(), "val": np.where(np.isnan(val), None, val).tolist()})
-    if not frames:
-        return None
-    return {"frames": frames, "var_key": var_name, "var_label": field_label}
-
