@@ -3,7 +3,28 @@
   "displayName": "VMECdash Viewer",
   "description": "Native VS Code viewer for VMEC wout NetCDF equilibria.",
   "version": "0.1.0",
-  "publisher": "vmecdash",
+  "publisher": "HengqianLiu",
+  "license": "MIT",
+  "icon": "media/icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/DMCXE/VMECdash.git",
+    "directory": "extension"
+  },
+  "homepage": "https://github.com/DMCXE/VMECdash#readme",
+  "bugs": {
+    "url": "https://github.com/DMCXE/VMECdash/issues"
+  },
+  "keywords": [
+    "vmec",
+    "stellarator",
+    "tokamak",
+    "plasma",
+    "equilibrium",
+    "netcdf",
+    "plotly",
+    "fusion"
+  ],
   "engines": {
     "vscode": "^1.90.0"
   },
@@ -67,6 +88,7 @@
     }
   },
   "scripts": {
+    "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./"
   },
