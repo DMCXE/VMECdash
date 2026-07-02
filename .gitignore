@@ -1,6 +1,9 @@
 # Python
 __pycache__/
 *.pyc
+dist/
+build/
+*.egg-info/
 
 /helper_tools/
 

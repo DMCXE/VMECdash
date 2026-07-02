@@ -8,6 +8,16 @@ version = "0.1.0"
 description = "Dash and VS Code tooling for inspecting VMEC wout NetCDF equilibria"
 readme = "README.md"
 requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Hengqian Liu" }]
+keywords = ["vmec", "stellarator", "plasma", "equilibrium", "netcdf", "plotly", "fusion"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+  "Intended Audience :: Science/Research",
+  "Topic :: Scientific/Engineering :: Physics",
+]
 dependencies = [
   "plotly>=5.22.0",
   "numpy>=1.24.0",
@@ -29,6 +39,11 @@ dev = [
 
 [project.scripts]
 vmecdash = "vmecdash.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/DMCXE/VMECdash"
+Repository = "https://github.com/DMCXE/VMECdash"
+Issues = "https://github.com/DMCXE/VMECdash/issues"
 
 [tool.setuptools.packages.find]
 where = ["."]
