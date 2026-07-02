@@ -28,10 +28,17 @@ lines.
 
    JAX is pulled in automatically; the CPU build works out of the box.
 
-2. Tell the extension which interpreter to use — any one of:
-   - set `vmecdash.pythonPath` to the Python executable, **or**
-   - select an interpreter with the Microsoft Python extension, **or**
-   - have `python` on your `PATH`.
+2. Tell the extension which interpreter to use. It resolves one in this order:
+   1. the **`vmecdash.pythonPath`** setting — set it at **User** scope so it applies to every
+      workspace (Command Palette → **“VMECdash: Select Python Path”** lets you pick User or
+      Workspace), **or**
+   2. the **`VMECDASH_PYTHON`** environment variable (handy for Remote-SSH / CI / terminal
+      launches), **or**
+   3. the interpreter selected by the Microsoft Python extension, **or**
+   4. `python3` / `python` on your `PATH`.
+
+   The chosen interpreter must have `vmecdash` installed. If it doesn't, the extension tells you
+   *which* interpreter it used and offers a **Select Python Path** button — it won't fail silently.
 
 3. Run **“VMECdash: Check Backend”** from the Command Palette to verify (`vmecdash` + `jax`
    versions).

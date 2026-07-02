@@ -2,7 +2,7 @@
   "name": "vmecdash-viewer",
   "displayName": "VMECdash Viewer",
   "description": "Native VS Code viewer for VMEC wout NetCDF equilibria.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "publisher": "HengqianLiu",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -74,7 +74,8 @@
         "vmecdash.pythonPath": {
           "type": "string",
           "default": "",
-          "description": "Python executable used to run python -m vmecdash.vscode_backend --stdio."
+          "scope": "machine-overridable",
+          "description": "Path to a Python executable that has the 'vmecdash' package installed, used to run 'python -m vmecdash.vscode_backend --stdio'. Set this at User scope to apply to every workspace. Resolution order: this setting, then the VMECDASH_PYTHON environment variable, then the Python extension's selected interpreter, then python3/python on PATH."
         },
         "vmecdash.backendArgs": {
           "type": "array",

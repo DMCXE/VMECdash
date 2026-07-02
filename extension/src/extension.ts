@@ -3,7 +3,7 @@ import * as fs from "fs";
 import * as vscode from "vscode";
 
 export function activate(context: vscode.ExtensionContext) {
-  const backend = new BackendClient(context);
+  const backend = new BackendClient();
   const provider = new VmecDashEditorProvider(context, backend);
   context.subscriptions.push(
     vscode.window.registerCustomEditorProvider("vmecdash.woutPreview", provider, {
@@ -39,13 +39,25 @@ export function activate(context: vscode.ExtensionContext) {
       const current = vscode.workspace.getConfiguration("vmecdash").get<string>("pythonPath") || "";
       const value = await vscode.window.showInputBox({
         title: "VMECdash Python Path",
-        prompt: "Python executable with vmecdash installed",
+        prompt: "Path to a Python executable that has the 'vmecdash' package installed",
         value: current,
+        ignoreFocusOut: true,
       });
-      if (value !== undefined) {
-        await vscode.workspace.getConfiguration("vmecdash").update("pythonPath", value, vscode.ConfigurationTarget.Workspace);
-        backend.restart();
-      }
+      if (value === undefined) return;
+      const hasWorkspace = (vscode.workspace.workspaceFolders?.length ?? 0) > 0;
+      const scopes = [
+        { label: "User (Global)", description: "Applies to every workspace", target: vscode.ConfigurationTarget.Global },
+        ...(hasWorkspace
+          ? [{ label: "Workspace", description: "Only this workspace", target: vscode.ConfigurationTarget.Workspace }]
+          : []),
+      ];
+      const scope = scopes.length === 1 ? scopes[0] : await vscode.window.showQuickPick(scopes, {
+        title: "Where should this Python path be saved?",
+        ignoreFocusOut: true,
+      });
+      if (!scope) return;
+      await vscode.workspace.getConfiguration("vmecdash").update("pythonPath", value.trim(), scope.target);
+      backend.restart();
     }),
     backend,
   );
@@ -62,9 +74,8 @@ class BackendClient implements vscode.Disposable {
   private nextId = 1;
   private pending = new Map<number, Pending>();
   private buffer = "";
+  private stderr = "";
   private process?: cp.ChildProcessWithoutNullStreams;
-
-  constructor(private readonly context: vscode.ExtensionContext) {}
 
   dispose() {
     if (this.process) {
@@ -96,7 +107,12 @@ class BackendClient implements vscode.Disposable {
     if (this.process && !this.process.killed) {
       return this.process;
     }
-    const python = await resolvePython();
+    const { python, source } = await resolvePython();
+    // Validate explicit interpreter paths up front (bare commands like "python3" resolve via PATH).
+    const looksLikePath = python.includes("/") || python.includes("\\");
+    if (looksLikePath && !fs.existsSync(python)) {
+      throw new Error(`Python interpreter not found: "${python}" (from ${source}).`);
+    }
     const config = vscode.workspace.getConfiguration("vmecdash");
     const extraArgs = config.get<string[]>("backendArgs") || [];
     const args = ["-m", "vmecdash.vscode_backend", "--stdio", ...extraArgs];
@@ -106,17 +122,42 @@ class BackendClient implements vscode.Disposable {
       stdio: ["pipe", "pipe", "pipe"],
     });
     this.process = child;
+    this.stderr = "";
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (chunk) => this.onStdout(String(chunk)));
     child.stderr.setEncoding("utf8");
-    child.stderr.on("data", (chunk) => console.error(`[vmecdash-backend] ${chunk}`));
+    child.stderr.on("data", (chunk) => {
+      const text = String(chunk);
+      this.stderr = (this.stderr + text).slice(-4000);
+      console.error(`[vmecdash-backend] ${text}`);
+    });
+    child.on("error", (err) => {
+      const error = new Error(`Failed to start Python "${python}" (from ${source}): ${messageOf(err)}`);
+      for (const { reject } of this.pending.values()) reject(error);
+      this.pending.clear();
+      this.process = undefined;
+    });
     child.on("exit", (code, signal) => {
-      const error = new Error(`VMECdash backend exited (${code ?? signal})`);
+      const error = this.describeExit(code, signal, python, source);
       for (const { reject } of this.pending.values()) reject(error);
       this.pending.clear();
       this.process = undefined;
     });
     return child;
+  }
+
+  private describeExit(code: number | null, signal: NodeJS.Signals | null, python: string, source: string): Error {
+    const stderr = this.stderr.trim();
+    const importFailure = /No module named ['"]?vmecdash/.test(stderr) || /ModuleNotFoundError.*vmecdash/.test(stderr);
+    if (importFailure) {
+      showBackendSetupError(python, source);
+      return new Error(
+        `The Python interpreter (${python}, from ${source}) does not have the 'vmecdash' package. ` +
+          `Run 'pip install vmecdash' into it, or set vmecdash.pythonPath to an interpreter that has it.`,
+      );
+    }
+    const tail = stderr ? ` — ${stderr.split("\n").slice(-3).join(" ").slice(-300)}` : "";
+    return new Error(`VMECdash backend exited (${code ?? signal})${tail}`);
   }
 
   private onStdout(chunk: string) {
@@ -213,20 +254,31 @@ class VmecDashEditorProvider implements vscode.CustomReadonlyEditorProvider<{ ur
   }
 }
 
-async function resolvePython(): Promise<string> {
+type PythonResolution = { python: string; source: string };
+
+async function resolvePython(): Promise<PythonResolution> {
   const configPath = vscode.workspace.getConfiguration("vmecdash").get<string>("pythonPath");
-  if (configPath) return configPath;
+  if (configPath && configPath.trim()) {
+    return { python: configPath.trim(), source: "the vmecdash.pythonPath setting" };
+  }
+  const envPath = process.env.VMECDASH_PYTHON;
+  if (envPath && envPath.trim()) {
+    return { python: envPath.trim(), source: "the VMECDASH_PYTHON environment variable" };
+  }
   const pythonExtension = vscode.extensions.getExtension("ms-python.python");
   if (pythonExtension) {
     try {
       const api = pythonExtension.isActive ? pythonExtension.exports : await pythonExtension.activate();
       const details = api?.settings?.getExecutionDetails ? api.settings.getExecutionDetails() : undefined;
-      if (details?.execCommand?.[0]) return details.execCommand[0];
+      if (details?.execCommand?.[0]) {
+        return { python: details.execCommand[0], source: "the Python extension's selected interpreter" };
+      }
     } catch (error) {
       console.warn(`Unable to read Python extension interpreter: ${messageOf(error)}`);
     }
   }
-  return process.platform === "win32" ? "python" : "python3";
+  const fallback = process.platform === "win32" ? "python" : "python3";
+  return { python: fallback, source: `"${fallback}" on PATH` };
 }
 
 function workspaceCwd(): string | undefined {
@@ -244,4 +296,23 @@ function warnIfPlotlyUntested(health: any) {
 
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function showBackendSetupError(python: string, source: string) {
+  const selectPython = "Select Python Path";
+  const openDocs = "Open Setup Docs";
+  vscode.window
+    .showErrorMessage(
+      `VMECdash backend could not start: the Python interpreter (${python}, from ${source}) does not have the 'vmecdash' package installed. ` +
+        `Install it with 'pip install vmecdash', or point the extension at an interpreter that has it.`,
+      selectPython,
+      openDocs,
+    )
+    .then((choice) => {
+      if (choice === selectPython) {
+        vscode.commands.executeCommand("vmecdash.selectPython");
+      } else if (choice === openDocs) {
+        vscode.env.openExternal(vscode.Uri.parse("https://github.com/DMCXE/VMECdash#readme"));
+      }
+    });
 }
