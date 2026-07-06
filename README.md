@@ -1,5 +1,7 @@
 # VMECdash
 
+**By [USTC Stellarator Lab](https://github.com/USTCstellarators) — MIT License**
+
 An interactive Dash application for exploring VMEC `wout_*.nc` stellarator equilibria.  
 It reconstructs magnetic surfaces with JAX, renders 1‑D/2‑D/3‑D plots and so on, motivated by the original MATLAB tool **VMECplot.m**.
 
@@ -111,3 +113,13 @@ Feel free to open issues or pull requests to add new physical quantities, UI twe
 ## Next step
 - Add jax-based boozer coordinate transformation.
 - Fast evaulation of EffetiveRipple, GammaC, maybe slow without gpu.
+
+---
+
+## License
+
+MIT © USTC Stellarator Lab and contributors. See [LICENSE](LICENSE).
+
+The VS Code extension bundles [Plotly.js](https://github.com/plotly/plotly.js)
+(`extension/media/plotly.min.js`), which is also distributed under the MIT License
+(© Plotly, Inc.).

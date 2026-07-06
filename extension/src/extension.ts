@@ -36,28 +36,29 @@ export function activate(context: vscode.ExtensionContext) {
       }
     }),
     vscode.commands.registerCommand("vmecdash.selectPython", async () => {
-      const current = vscode.workspace.getConfiguration("vmecdash").get<string>("pythonPath") || "";
-      const value = await vscode.window.showInputBox({
-        title: "VMECdash Python Path",
-        prompt: "Path to a Python executable that has the 'vmecdash' package installed",
-        value: current,
-        ignoreFocusOut: true,
-      });
-      if (value === undefined) return;
-      const hasWorkspace = (vscode.workspace.workspaceFolders?.length ?? 0) > 0;
-      const scopes = [
-        { label: "User (Global)", description: "Applies to every workspace", target: vscode.ConfigurationTarget.Global },
-        ...(hasWorkspace
-          ? [{ label: "Workspace", description: "Only this workspace", target: vscode.ConfigurationTarget.Workspace }]
-          : []),
-      ];
-      const scope = scopes.length === 1 ? scopes[0] : await vscode.window.showQuickPick(scopes, {
-        title: "Where should this Python path be saved?",
-        ignoreFocusOut: true,
-      });
-      if (!scope) return;
-      await vscode.workspace.getConfiguration("vmecdash").update("pythonPath", value.trim(), scope.target);
+      const pythonExtension = vscode.extensions.getExtension("ms-python.python");
+      if (!pythonExtension) {
+        vscode.window.showErrorMessage("VMECdash requires the Microsoft Python extension to select an interpreter.");
+        return;
+      }
+      const override = getPythonOverride();
+      await pythonExtension.activate();
+      await vscode.commands.executeCommand("python.setInterpreter");
       backend.restart();
+      if (override) {
+        vscode.window.showWarningMessage(
+          `VMECdash will still use ${override.source} (${override.python}) until that override is cleared.`,
+        );
+      }
+      try {
+        const resolution = await resolvePython();
+        const health = await backend.request("health", {});
+        vscode.window.showInformationMessage(
+          `VMECdash backend OK using ${resolution.python} from ${resolution.source}: vmecdash ${health.vmecdashVersion}, jax ${health.jaxVersion}`,
+        );
+      } catch (error) {
+        vscode.window.showErrorMessage(`VMECdash backend failed: ${messageOf(error)}`);
+      }
     }),
     backend,
   );
@@ -118,7 +119,9 @@ class BackendClient implements vscode.Disposable {
     const args = ["-m", "vmecdash.vscode_backend", "--stdio", ...extraArgs];
     const child = cp.spawn(python, args, {
       cwd: workspaceCwd(),
-      env: { ...process.env, PYTHONUNBUFFERED: "1" },
+      // Force the backend's JAX onto the CPU so it never allocates GPU VRAM (important on
+      // shared GPU clusters). An explicit JAX_PLATFORMS in the environment still wins.
+      env: { ...process.env, JAX_PLATFORMS: process.env.JAX_PLATFORMS ?? "cpu", PYTHONUNBUFFERED: "1" },
       stdio: ["pipe", "pipe", "pipe"],
     });
     this.process = child;
@@ -257,18 +260,20 @@ class VmecDashEditorProvider implements vscode.CustomReadonlyEditorProvider<{ ur
 type PythonResolution = { python: string; source: string };
 
 async function resolvePython(): Promise<PythonResolution> {
-  const configPath = vscode.workspace.getConfiguration("vmecdash").get<string>("pythonPath");
-  if (configPath && configPath.trim()) {
-    return { python: configPath.trim(), source: "the vmecdash.pythonPath setting" };
-  }
-  const envPath = process.env.VMECDASH_PYTHON;
-  if (envPath && envPath.trim()) {
-    return { python: envPath.trim(), source: "the VMECDASH_PYTHON environment variable" };
+  const override = getPythonOverride();
+  if (override) {
+    return override;
   }
   const pythonExtension = vscode.extensions.getExtension("ms-python.python");
   if (pythonExtension) {
     try {
       const api = pythonExtension.isActive ? pythonExtension.exports : await pythonExtension.activate();
+      const environmentPath = api?.environments?.getActiveEnvironmentPath
+        ? api.environments.getActiveEnvironmentPath(pythonResource())
+        : undefined;
+      if (environmentPath?.path) {
+        return { python: environmentPath.path, source: "the Python extension's selected interpreter" };
+      }
       const details = api?.settings?.getExecutionDetails ? api.settings.getExecutionDetails() : undefined;
       if (details?.execCommand?.[0]) {
         return { python: details.execCommand[0], source: "the Python extension's selected interpreter" };
@@ -279,6 +284,22 @@ async function resolvePython(): Promise<PythonResolution> {
   }
   const fallback = process.platform === "win32" ? "python" : "python3";
   return { python: fallback, source: `"${fallback}" on PATH` };
+}
+
+function getPythonOverride(): PythonResolution | undefined {
+  const configPath = vscode.workspace.getConfiguration("vmecdash").get<string>("pythonPath");
+  if (configPath && configPath.trim()) {
+    return { python: configPath.trim(), source: "the vmecdash.pythonPath setting" };
+  }
+  const envPath = process.env.VMECDASH_PYTHON;
+  if (envPath && envPath.trim()) {
+    return { python: envPath.trim(), source: "the VMECDASH_PYTHON environment variable" };
+  }
+  return undefined;
+}
+
+function pythonResource(): vscode.Uri | undefined {
+  return vscode.workspace.workspaceFolders?.[0]?.uri;
 }
 
 function workspaceCwd(): string | undefined {
@@ -299,7 +320,7 @@ function messageOf(error: unknown): string {
 }
 
 function showBackendSetupError(python: string, source: string) {
-  const selectPython = "Select Python Path";
+  const selectPython = "Select Python Interpreter";
   const openDocs = "Open Setup Docs";
   vscode.window
     .showErrorMessage(

@@ -4,12 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vmecdash"
-version = "0.1.1"
+version = "0.1.4"
 description = "Dash and VS Code tooling for inspecting VMEC wout NetCDF equilibria"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
-authors = [{ name = "Hengqian Liu" }]
+authors = [{ name = "USTC Stellarator Lab" }]
+maintainers = [{ name = "Hengqian Liu" }]
 keywords = ["vmec", "stellarator", "plasma", "equilibrium", "netcdf", "plotly", "fusion"]
 classifiers = [
   "Programming Language :: Python :: 3",

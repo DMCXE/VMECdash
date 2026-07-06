@@ -2,8 +2,12 @@
   "name": "vmecdash-viewer",
   "displayName": "VMECdash Viewer",
   "description": "Native VS Code viewer for VMEC wout NetCDF equilibria.",
-  "version": "0.1.1",
+  "version": "0.1.4",
   "publisher": "HengqianLiu",
+  "author": {
+    "name": "USTC Stellarator Lab",
+    "url": "https://github.com/USTCstellarators"
+  },
   "license": "MIT",
   "icon": "media/icon.png",
   "repository": {
@@ -37,6 +41,9 @@
     "onCommand:vmecdash.checkBackend",
     "onCommand:vmecdash.selectPython"
   ],
+  "extensionDependencies": [
+    "ms-python.python"
+  ],
   "extensionKind": [
     "workspace"
   ],
@@ -65,7 +72,7 @@
       },
       {
         "command": "vmecdash.selectPython",
-        "title": "VMECdash: Select Python Path"
+        "title": "VMECdash: Select Python Interpreter"
       }
     ],
     "configuration": {
@@ -75,7 +82,7 @@
           "type": "string",
           "default": "",
           "scope": "machine-overridable",
-          "description": "Path to a Python executable that has the 'vmecdash' package installed, used to run 'python -m vmecdash.vscode_backend --stdio'. Set this at User scope to apply to every workspace. Resolution order: this setting, then the VMECDASH_PYTHON environment variable, then the Python extension's selected interpreter, then python3/python on PATH."
+          "description": "Advanced override: path to a Python executable that has the 'vmecdash' package installed. When set, this takes precedence over VMECDASH_PYTHON, the Microsoft Python extension's selected interpreter, and python3/python on PATH."
         },
         "vmecdash.backendArgs": {
           "type": "array",
@@ -99,4 +106,3 @@
     "typescript": "^5.4.0"
   }
 }
-
