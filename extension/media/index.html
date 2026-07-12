@@ -12,7 +12,7 @@
       <aside class="sidebar">
         <div class="brand">
           <span class="brand-mark" aria-hidden="true">
-            <svg viewBox="0 0 20 20" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.4"><ellipse cx="10" cy="10" rx="8" ry="4.2"/><ellipse cx="10" cy="10" rx="3" ry="1.5"/></svg>
+            <img src="{{brandUri}}" alt="" width="22" height="22" />
           </span>
           <span class="brand-text">
             <span class="brand-name">VMECdash</span>
@@ -29,8 +29,18 @@
       </aside>
       <main class="main">
         <header class="topbar">
-          <h1 id="viewTitle" class="view-title">VMECdash</h1>
-          <span id="status" class="status-pill"></span>
+          <span class="topbar-left">
+            <button id="navToggle" class="icon-btn" title="Toggle navigation" aria-label="Toggle navigation" aria-expanded="true">
+              <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><path d="M2.5 4h11M2.5 8h11M2.5 12h11"/></svg>
+            </button>
+            <h1 id="viewTitle" class="view-title">VMECdash</h1>
+          </span>
+          <span class="topbar-right">
+            <span id="status" class="status-pill"></span>
+            <button id="controlsToggle" class="icon-btn controls-toggle" title="Toggle controls" aria-label="Toggle controls" aria-expanded="false">
+              <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><path d="M2 4.5h8M12.5 4.5H14"/><circle cx="10.5" cy="4.5" r="1.6"/><path d="M2 11.5h1.5M6 11.5h8"/><circle cx="4.2" cy="11.5" r="1.6"/></svg>
+            </button>
+          </span>
         </header>
         <div id="stats" class="stats"></div>
         <div class="plot-wrap">

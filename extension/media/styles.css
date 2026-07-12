@@ -10,6 +10,7 @@
   --radius: 8px;
   --radius-sm: 5px;
   --ctl-h: 30px;
+  --topbar-h: 46px;
 
   --accent: var(--vscode-button-background, #0e639c);
   --accent-fg: var(--vscode-button-foreground, #ffffff);
@@ -40,10 +41,31 @@ body {
 
 /* ------------------------------------------------------------------ layout */
 
+/* Layout states are applied as classes by main.js (auto via matchMedia + manual toggles):
+   .nav-rail          — left sidebar collapsed to an icon rail
+   .controls-hidden   — right controls column removed (wide layouts)
+   .controls-drawer   — controls become an overlay drawer; .controls-open slides it in */
 .shell {
+  position: relative;
   display: grid;
-  grid-template-columns: 240px minmax(0, 1fr) 304px;
+  grid-template-columns: var(--nav-w, 240px) minmax(0, 1fr) var(--controls-w, 304px);
   height: 100vh;
+}
+
+.shell.nav-rail {
+  --nav-w: 48px;
+}
+
+.shell.controls-hidden {
+  --controls-w: 0px;
+}
+
+.shell.controls-hidden .controls {
+  display: none;
+}
+
+.shell.controls-drawer {
+  grid-template-columns: var(--nav-w, 240px) minmax(0, 1fr);
 }
 
 .sidebar,
@@ -83,6 +105,12 @@ body {
 .brand-mark {
   display: inline-flex;
   color: var(--accent);
+}
+
+.brand-mark img {
+  display: block;
+  width: 22px;
+  height: 22px;
 }
 
 .brand-text {
@@ -192,9 +220,40 @@ body {
   align-items: center;
   justify-content: space-between;
   gap: var(--sp-3);
-  padding: var(--sp-3) var(--sp-4);
+  height: var(--topbar-h);
+  padding: 0 var(--sp-4);
   border-bottom: 1px solid var(--border);
+  /* Stays above the controls drawer so the toggle remains reachable while it is open. */
+  position: relative;
+  z-index: 50;
+  background: var(--vscode-editor-background, Canvas);
 }
+
+.topbar-left,
+.topbar-right {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--vscode-foreground);
+  background: transparent;
+  cursor: pointer;
+}
+
+.icon-btn:hover {
+  background: var(--hover);
+}
+
 
 .view-title {
   margin: 0;
@@ -299,7 +358,8 @@ body {
 .plot-wrap {
   position: relative;
   flex: 1 1 auto;
-  min-height: 520px;
+  /* Shrink on short panes instead of pushing content below the fold. */
+  min-height: clamp(240px, 45vh, 520px);
   margin: 0 var(--sp-4) var(--sp-4);
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -534,21 +594,59 @@ select:focus-visible,
   display: none !important;
 }
 
-/* ------------------------------------------------------------------ responsive */
+/* ------------------------------------------------------------------ layout states */
 
-@media (max-width: 1040px) {
-  .shell {
-    grid-template-columns: 210px minmax(0, 1fr);
-  }
-  .controls {
-    grid-column: 1 / -1;
-    border-left: 0;
-    border-top: 1px solid var(--border);
-    max-height: 260px;
-  }
-  .control-body {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-    gap: 0 var(--sp-4);
-  }
+/* Icon rail (auto below 1100px, or toggled from the topbar). */
+.shell.nav-rail .sidebar {
+  padding: var(--sp-4) var(--sp-1);
+  align-items: center;
+}
+
+.shell.nav-rail .brand {
+  padding: var(--sp-1) 0 var(--sp-4);
+}
+
+.shell.nav-rail .brand-text,
+.shell.nav-rail .nav-label {
+  display: none;
+}
+
+.shell.nav-rail .nav {
+  width: 100%;
+}
+
+.shell.nav-rail .nav-item {
+  justify-content: center;
+  padding: var(--sp-2) 0;
+}
+
+.shell.nav-rail .sidebar-foot {
+  width: 100%;
+}
+
+.shell.nav-rail .sidebar-foot .btn-primary > span:not(.nav-icon) {
+  display: none;
+}
+
+/* Drawer (auto below 900px): controls overlay the plot, toggled from the topbar. */
+.shell.controls-drawer .controls {
+  position: absolute;
+  z-index: 40;
+  top: var(--topbar-h);
+  right: 0;
+  bottom: 0;
+  width: 300px;
+  max-width: 85%;
+  /* Must be opaque over the plot; Canvas keeps a sane color if theme vars are missing. */
+  background: var(--vscode-sideBar-background, var(--vscode-editor-background, Canvas));
+  border-left: 1px solid var(--border);
+  box-shadow: -6px 0 18px rgba(0, 0, 0, 0.25);
+  transform: translateX(100%);
+  visibility: hidden;
+  transition: transform 0.18s ease, visibility 0.18s;
+}
+
+.shell.controls-drawer.controls-open .controls {
+  transform: translateX(0);
+  visibility: visible;
 }

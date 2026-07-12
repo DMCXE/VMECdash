@@ -42,6 +42,7 @@ class Control:
     max: Any = None
     step: Any = None
     unit: str | None = None  # optional suffix shown next to a slider's live value
+    visible_when: dict[str, Any] | None = None  # {sibling_ctrl_id: value_or_list}; AND across keys, list = any-of
 
 
 @dataclass(frozen=True)
@@ -186,9 +187,15 @@ VIEWS: dict[str, ViewSpec] = {
         controls=[
             Control("type2d", "select", "Plot Type", default="cross_section", options=_TYPE_2D_OPTIONS),
             Control("var2d", "select", "Color Variable", default="geometry", options_from="fields"),
-            Control("phi", "slider", "Toroidal Angle", default=0.0, min=0, max=1, step=0.01),
+            Control(
+                "phi", "slider", "Toroidal Angle", default=0.0, min=0, max=1, step=0.01,
+                visible_when={"type2d": "cross_section"},
+            ),
             Control("sIdx", "slider", "Flux Surface Index", default="ns-1", min=0, max="ns-1", step=1),
-            Control("geoCount", "number", "Visible Geometry Surfaces", default=15, min=1, max=200, step=1),
+            Control(
+                "geoCount", "number", "Visible Geometry Surfaces", default=15, min=1, max=200, step=1,
+                visible_when={"type2d": "cross_section", "var2d": "geometry"},
+            ),
         ],
         render=twod_view,
     ),
@@ -212,11 +219,23 @@ VIEWS: dict[str, ViewSpec] = {
         controls=[
             Control("fieldlineType", "select", "Plot Type", default="2d_modB", options=_FIELDLINE_TYPE_OPTIONS),
             Control("fieldlineSIdx", "slider", "Flux Surface Index", default="max(1,ns-1)", min=1, max="ns-1", step=1),
-            Control("fieldlineNLines", "number", "Number of Lines", default=6, min=1, max=20, step=1),
-            Control("fieldlineTransits", "number", "Transits", default=50, min=10, max=500, step=10),
-            Control("fieldlineAlpha0", "number", "Alpha Start", default=0.0, step=0.1),
+            Control(
+                "fieldlineNLines", "number", "Number of Lines", default=6, min=1, max=20, step=1,
+                visible_when={"fieldlineType": "1d_lines"},
+            ),
+            Control(
+                "fieldlineTransits", "number", "Transits", default=50, min=10, max=500, step=10,
+                visible_when={"fieldlineType": "single_trace"},
+            ),
+            Control(
+                "fieldlineAlpha0", "number", "Alpha Start", default=0.0, step=0.1,
+                visible_when={"fieldlineType": "single_trace"},
+            ),
             Control("fieldlineRes", "select", "Resolution", default="128", options=_FIELDLINE_RES_OPTIONS),
-            Control("fieldlineZetaShift", "checkbox", "Shift ζ by π/NFP", default=False),
+            Control(
+                "fieldlineZetaShift", "checkbox", "Shift ζ by π/NFP", default=False,
+                visible_when={"fieldlineType": ["2d_modB", "1d_lines"]},
+            ),
         ],
         render=fieldline_view,
     ),
@@ -241,6 +260,7 @@ def build_ui_schema(vmec: Any) -> dict[str, Any]:
                     "max": _resolve_token(control.max, vmec),
                     "step": control.step,
                     "unit": control.unit,
+                    "visibleWhen": control.visible_when,
                 }
             )
         views.append(

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vmecdash"
-version = "0.1.4"
+version = "0.1.5"
 description = "Dash and VS Code tooling for inspecting VMEC wout NetCDF equilibria"
 readme = "README.md"
 requires-python = ">=3.10"

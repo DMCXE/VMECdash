@@ -246,6 +246,7 @@ class VmecDashEditorProvider implements vscode.CustomReadonlyEditorProvider<{ ur
       "{{nonce}}": nonce,
       "{{cspSource}}": webview.cspSource,
       "{{stylesUri}}": webview.asWebviewUri(vscode.Uri.joinPath(media, "styles.css")).toString(),
+      "{{brandUri}}": webview.asWebviewUri(vscode.Uri.joinPath(media, "brand.png")).toString(),
       "{{plotlyUri}}": webview.asWebviewUri(vscode.Uri.joinPath(media, "plotly.min.js")).toString(),
       "{{scriptUri}}": webview.asWebviewUri(vscode.Uri.joinPath(media, "main.js")).toString(),
     };

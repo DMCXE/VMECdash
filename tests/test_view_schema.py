@@ -66,6 +66,45 @@ def test_no_default_drift_between_schema_and_render_fallback():
             assert control["default"] == view_schema.cv({}, view["id"], control["id"], vmec)
 
 
+def test_visible_when_shipped_in_schema():
+    """visibleWhen must reach the Webview for exactly the conditional controls."""
+    vmec = _vmec()
+    schema = view_schema.build_ui_schema(vmec)
+    visible_when = {
+        (view["id"], control["id"]): control["visibleWhen"]
+        for view in schema["views"]
+        for control in view["controls"]
+    }
+    expected = {
+        ("2d", "phi"): {"type2d": "cross_section"},
+        ("2d", "geoCount"): {"type2d": "cross_section", "var2d": "geometry"},
+        ("fieldline", "fieldlineNLines"): {"fieldlineType": "1d_lines"},
+        ("fieldline", "fieldlineTransits"): {"fieldlineType": "single_trace"},
+        ("fieldline", "fieldlineAlpha0"): {"fieldlineType": "single_trace"},
+        ("fieldline", "fieldlineZetaShift"): {"fieldlineType": ["2d_modB", "1d_lines"]},
+    }
+    for key, rule in expected.items():
+        assert visible_when[key] == rule
+    for key, rule in visible_when.items():
+        if key not in expected:
+            assert rule is None
+
+
+def test_visible_when_references_valid_sibling_controls():
+    """Every visible_when key must name another control in the same view (typo guard)."""
+    for view in view_schema.VIEWS.values():
+        control_ids = {control.id for control in view.controls}
+        for control in view.controls:
+            for ref_id, wanted in (control.visible_when or {}).items():
+                assert ref_id in control_ids, f"{view.id}/{control.id} references unknown control {ref_id!r}"
+                assert ref_id != control.id
+                ref = next(c for c in view.controls if c.id == ref_id)
+                if ref.options is not None:
+                    valid = {opt["value"] for opt in ref.options}
+                    values = wanted if isinstance(wanted, list) else [wanted]
+                    assert set(values) <= valid, f"{view.id}/{control.id} references unknown value(s) {values}"
+
+
 def test_health_features_derived_from_registry():
     backend = VmecDashBackend()
     features = backend.health()["features"]

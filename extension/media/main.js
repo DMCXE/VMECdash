@@ -91,6 +91,25 @@
     });
   }
 
+  // visibleWhen from the schema: {siblingCtrlId: valueOrList}; AND across keys, list = any-of.
+  // Values are string-compared, matching how <option> selection is resolved.
+  function isVisible(control) {
+    const cond = control.visibleWhen;
+    if (!cond) return true;
+    return Object.keys(cond).every((id) => {
+      const wanted = cond[id];
+      const actual = String(state.controls[id]);
+      if (Array.isArray(wanted)) return wanted.some((v) => String(v) === actual);
+      return String(wanted) === actual;
+    });
+  }
+
+  // Controls whose value drives another control's visibility need a panel re-render on change.
+  function isVisibilityDriver(id) {
+    const spec = currentSpec();
+    return !!spec && spec.controls.some((control) => control.visibleWhen && control.visibleWhen[id] !== undefined);
+  }
+
   function optionsFor(spec) {
     if (spec.options) return spec.options;
     const meta = state.meta || {};
@@ -118,7 +137,7 @@
     el.nav.innerHTML = views()
       .map(
         (view) =>
-          `<button class="nav-item${state.currentView === view.id ? " active" : ""}" data-view="${view.id}"><span class="nav-icon">${ICONS[view.icon] || ""}</span><span class="nav-label">${escapeHtml(view.label)}</span></button>`,
+          `<button class="nav-item${state.currentView === view.id ? " active" : ""}" data-view="${view.id}" title="${escapeHtml(view.label)}"><span class="nav-icon">${ICONS[view.icon] || ""}</span><span class="nav-label">${escapeHtml(view.label)}</span></button>`,
       )
       .join("");
     el.nav.querySelectorAll("[data-view]").forEach((button) => {
@@ -174,7 +193,7 @@
       el.controls.innerHTML = '<p class="control-empty">This view has no adjustable controls. It uses canonical VMEC profiles and scalar metadata.</p>';
       return;
     }
-    el.controls.innerHTML = spec.controls.map(renderControl).join("");
+    el.controls.innerHTML = spec.controls.filter(isVisible).map(renderControl).join("");
     bindControls();
   }
 
@@ -194,8 +213,11 @@
         event,
         debounce(() => {
           readControls();
-          requestRender();
-        }, isRange ? 120 : 0),
+          // Selects/checkboxes may show/hide sibling controls (schema visibleWhen).
+          if (input.dataset.id && isVisibilityDriver(input.dataset.id)) renderControls();
+          // Slider drags render silently (no overlay flash); pumpRender paces the stream.
+          requestRender({ silent: isRange });
+        }, isRange ? 60 : 0),
       );
     });
   }
@@ -210,13 +232,27 @@
     });
   }
 
-  function requestRender() {
+  // One render request in flight at a time; newer requests coalesce into `renderQueued` so a
+  // dragged slider produces a stream of sequential renders paced by backend latency instead of
+  // flooding the (serial) backend. `silent` skips the loading overlay for continuous updates.
+  let renderInFlight = false;
+  let renderQueued = null;
+
+  function requestRender(opts) {
     if (!state.sessionId) return;
-    const serial = ++state.renderSerial;
+    renderQueued = { serial: ++state.renderSerial, silent: !!(opts && opts.silent) };
+    pumpRender();
+  }
+
+  function pumpRender() {
+    if (renderInFlight || !renderQueued) return;
+    const req = renderQueued;
+    renderQueued = null;
+    renderInFlight = true;
     setStatus("Rendering…", "busy");
-    showLoading(true);
+    if (!req.silent) showLoading(true);
     post("render", {
-      serial,
+      serial: req.serial,
       sessionId: state.sessionId,
       view: state.currentView,
       controls: state.controls,
@@ -269,6 +305,8 @@
       renderControls();
       requestRender();
     } else if (message.type === "rendered") {
+      renderInFlight = false;
+      pumpRender();
       if (message.serial && message.serial < state.renderSerial) return; // drop stale response
       showLoading(false);
       const figure = message.result.figure;
@@ -283,6 +321,8 @@
       });
       setStatus("Ready", "ok");
     } else if (message.type === "error") {
+      renderInFlight = false;
+      pumpRender();
       showLoading(false);
       setStatus(message.message || "Error", "error");
     } else if (message.type === "status") {
@@ -292,6 +332,58 @@
 
   const exportButton = document.getElementById("exportReport");
   if (exportButton) exportButton.addEventListener("click", () => post("exportReport", { sessionId: state.sessionId }));
+
+  // ---- Layout states: auto-collapse from pane width (matchMedia), plus persisted manual
+  // toggles that work at any width. navCollapsed stays undefined (= follow width) until the
+  // user explicitly toggles the sidebar.
+  const shell = document.querySelector(".shell");
+  const navToggle = document.getElementById("navToggle");
+  const controlsToggle = document.getElementById("controlsToggle");
+  const railAuto = window.matchMedia("(max-width: 1100px)");
+  const drawerAuto = window.matchMedia("(max-width: 900px)");
+  const ui = Object.assign({ navCollapsed: undefined, controlsHidden: false, drawerOpen: false }, vscode.getState());
+
+  function saveUi() {
+    vscode.setState(Object.assign({}, vscode.getState(), ui));
+  }
+
+  function applyLayout() {
+    const rail = ui.navCollapsed !== undefined ? ui.navCollapsed : railAuto.matches;
+    shell.classList.toggle("nav-rail", rail);
+    shell.classList.toggle("controls-drawer", drawerAuto.matches);
+    shell.classList.toggle("controls-open", drawerAuto.matches && ui.drawerOpen);
+    shell.classList.toggle("controls-hidden", !drawerAuto.matches && ui.controlsHidden);
+    if (navToggle) navToggle.setAttribute("aria-expanded", String(!rail));
+    if (controlsToggle) {
+      controlsToggle.setAttribute("aria-expanded", String(drawerAuto.matches ? ui.drawerOpen : !ui.controlsHidden));
+    }
+  }
+
+  if (navToggle) {
+    navToggle.addEventListener("click", () => {
+      ui.navCollapsed = !shell.classList.contains("nav-rail");
+      saveUi();
+      applyLayout();
+    });
+  }
+  if (controlsToggle) {
+    controlsToggle.addEventListener("click", () => {
+      if (drawerAuto.matches) ui.drawerOpen = !ui.drawerOpen;
+      else ui.controlsHidden = !ui.controlsHidden;
+      saveUi();
+      applyLayout();
+    });
+  }
+  document.querySelector(".plot-wrap").addEventListener("click", () => {
+    if (drawerAuto.matches && ui.drawerOpen) {
+      ui.drawerOpen = false;
+      saveUi();
+      applyLayout();
+    }
+  });
+  railAuto.addEventListener("change", applyLayout);
+  drawerAuto.addEventListener("change", applyLayout);
+  applyLayout();
 
   setStatus("Starting backend…", "busy");
   post("ready");
