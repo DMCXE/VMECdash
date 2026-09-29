@@ -1,3 +1,6 @@
+# Convenience pins for the standalone Dash app.
+# pyproject.toml is authoritative; this mirrors `pip install -e .[dash]`.
+# Keep the two in sync when changing a dependency.
 dash>=2.16.1
 dash-mantine-components>=0.14.5
 dash-iconify>=0.1.2

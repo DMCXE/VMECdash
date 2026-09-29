@@ -2,7 +2,7 @@
   "name": "vmecdash-viewer",
   "displayName": "VMECdash Viewer",
   "description": "Native VS Code viewer for VMEC wout NetCDF equilibria.",
-  "version": "0.1.5",
+  "version": "0.2.0",
   "publisher": "HengqianLiu",
   "author": {
     "name": "USTC Stellarator Lab",
@@ -91,6 +91,11 @@
             "type": "string"
           },
           "description": "Additional arguments passed to the VMECdash backend."
+        },
+        "vmecdash.autoReload": {
+          "type": "boolean",
+          "default": false,
+          "description": "Reload the preview automatically when the wout file changes on disk. Off by default: a running VMEC rewrites its output repeatedly, so the preview shows a 'File changed' badge and waits for you to reload."
         }
       }
     }

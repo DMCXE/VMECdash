@@ -13,7 +13,6 @@ os.environ.setdefault("MPLCONFIGDIR", os.path.join(tempfile.gettempdir(), "vmecd
 
 from vmecdash.core import VMECJaxProcessor
 
-
 EXAMPLE_WOUT = "example/wout_PO.nc"
 
 

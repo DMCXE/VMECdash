@@ -259,6 +259,45 @@ body {
   margin: 0;
   font-size: 15px;
   font-weight: 600;
+  white-space: nowrap;
+}
+
+/* Which equilibrium is on screen, and how old it is. Drops out on narrow panes, where
+   the view title and the controls toggle matter more. */
+.file-meta {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  min-width: 0;
+  padding-left: var(--sp-2);
+  border-left: 1px solid var(--border);
+}
+
+.file-name {
+  font-size: 12px;
+  color: var(--vscode-foreground);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.file-time {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+@media (max-width: 860px) {
+  .file-meta {
+    display: none;
+  }
+}
+
+/* The reload button flags itself when the watcher reports the file changed. */
+.icon-btn.attention {
+  color: var(--vscode-charts-yellow, #d7a300);
+  border-color: currentColor;
 }
 
 .status-pill {
@@ -268,6 +307,11 @@ body {
   border-radius: 999px;
   border: 1px solid var(--border);
   white-space: nowrap;
+}
+
+.status-pill[data-kind="stale"] {
+  color: var(--vscode-charts-yellow, #d7a300);
+  border-color: currentColor;
 }
 
 .status-pill[data-kind="busy"] {

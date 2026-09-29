@@ -13,7 +13,6 @@ if str(ROOT) not in sys.path:
 
 from vmecdash.core import VMECJaxProcessor
 
-
 EXAMPLE_WOUT = "example/wout_PO.nc"
 PS3_WOUT = Path("/Users/dmcxe/Downloads/wout_PS3_ms_dofs.nc")
 
@@ -97,14 +96,14 @@ def test_cross_section_field_renderer_builds_carpet():
 
 
 def test_lambda_cross_section_uses_axis_fill_regularization():
-    from vmecdash.renderers.two_d import _carpet_colorscale, _sample_field_color, render_cross_section_field
-    from vmecdash.theme import build_theme
+    from vmecdash.renderers.two_d import _sample_field_color, render_cross_section_field
+    from vmecdash.theme import build_theme, resolve_colorscale
 
     vmec = VMECJaxProcessor.from_file(EXAMPLE_WOUT)
     _, _, val_nodes = vmec.get_cross_section_mesh(0.0, "lambda", res_u=480)
-    colorscale, reversescale, zmin, zmax = _carpet_colorscale(val_nodes)
+    cs = resolve_colorscale(val_nodes)
     axis_value = float(np.nanmean(val_nodes[1, :-1]))
-    expected_fill = _sample_field_color(axis_value, colorscale, reversescale, zmin, zmax)
+    expected_fill = _sample_field_color(axis_value, cs)
 
     fig = render_cross_section_field(vmec, 0.0, "lambda", "Lambda", build_theme(True, 0))
     trace_types = [trace.type for trace in fig.data]
@@ -118,8 +117,11 @@ def test_lambda_cross_section_uses_axis_fill_regularization():
     assert fig.data[0].name == "Axis fill"
     assert fig.data[0].fillcolor == expected_fill
     assert sample_trace.marker.showscale is True
-    assert sample_trace.marker.cmin == zmin
-    assert sample_trace.marker.cmax == zmax
+    assert sample_trace.marker.cmin == cs.zmin
+    assert sample_trace.marker.cmax == cs.zmax
+    # Lambda is signed, so the policy must hand back a diverging scale centred on zero.
+    assert cs.scale == "RdBu"
+    assert cs.zmin == -cs.zmax
     assert sample_trace.marker.size == 6
     assert len(sample_trace.x) > 0
     assert len(fig.layout.images) == 0

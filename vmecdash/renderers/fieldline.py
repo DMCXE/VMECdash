@@ -4,23 +4,31 @@ import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-from vmecdash.theme import PlotTheme
+from vmecdash.theme import CONTOUR_LEVELS, CONTOUR_LINE_COLOR, PlotTheme, resolve_colorscale
 
 
-def render_fieldline_heatmap(vmec, s_idx: int, res: int, theme: PlotTheme, shift_zeta: bool = False):
+def render_fieldline_heatmap(
+    vmec, s_idx: int, res: int, theme: PlotTheme, shift_zeta: bool = False, colormap: str | None = None,
+    contour_style: str = "fill", contour_lines: bool = True,
+):
     zeta_offset = float(np.pi / vmec.nfp) if shift_zeta else 0.0
     alpha_grid, zeta_grid, b_data = vmec.compute_field_line_properties(
         s_idx=s_idx, alpha_points=res, zeta_points=res, single_line=False, zeta_offset=zeta_offset
     )
+    cs = resolve_colorscale(b_data, colormap)
+    coloring = {"smooth": "heatmap", "lines": "lines"}.get(contour_style, "fill")
     fig = go.Figure(
         data=go.Contour(
             z=b_data,
             x=zeta_grid,
             y=alpha_grid,
-            colorscale="Viridis",
-            ncontours=50,
-            contours=dict(coloring="fill", showlines=True, showlabels=False),
-            line=dict(color="black", width=0.5),
+            colorscale=cs.scale,
+            reversescale=cs.reversescale,
+            zmin=cs.zmin,
+            zmax=cs.zmax,
+            ncontours=CONTOUR_LEVELS,
+            contours=dict(coloring=coloring, showlines=contour_lines or coloring == "lines", showlabels=False),
+            line=dict(color=CONTOUR_LINE_COLOR, width=0.5),
             colorbar=dict(title="|B| [T]"),
         )
     )
@@ -35,7 +43,9 @@ def render_fieldline_heatmap(vmec, s_idx: int, res: int, theme: PlotTheme, shift
     return fig
 
 
-def render_fieldline_lines(vmec, s_idx: int, n_lines: int, res: int, theme: PlotTheme, shift_zeta: bool = False):
+def render_fieldline_lines(
+    vmec, s_idx: int, n_lines: int, res: int, theme: PlotTheme, shift_zeta: bool = False,
+):
     zeta_offset = float(np.pi / vmec.nfp) if shift_zeta else 0.0
     alpha_grid, zeta_grid, b_data = vmec.compute_field_line_properties(
         s_idx=s_idx, alpha_points=res, zeta_points=res, single_line=False, zeta_offset=zeta_offset
@@ -58,7 +68,9 @@ def render_fieldline_lines(vmec, s_idx: int, n_lines: int, res: int, theme: Plot
     return fig
 
 
-def render_single_trace(vmec, s_idx: int, transits: int, alpha0: float, res: int, theme: PlotTheme):
+def render_single_trace(
+    vmec, s_idx: int, transits: int, alpha0: float, res: int, theme: PlotTheme, colormap: str | None = None,
+):
     zeta_grid, alpha_segments, b_data = vmec.compute_field_line_properties(
         s_idx=s_idx, zeta_points=res, n_transits=transits, alpha0=alpha0, single_line=True
     )
@@ -86,7 +98,7 @@ def render_single_trace(vmec, s_idx: int, transits: int, alpha0: float, res: int
             marker=dict(
                 size=2,
                 color=b_flat,
-                colorscale="Viridis",
+                colorscale=resolve_colorscale(b_flat, colormap).scale,
                 showscale=True,
                 colorbar=dict(title="|B| [T]", len=0.45, y=0.78),
                 opacity=0.8,
@@ -100,7 +112,7 @@ def render_single_trace(vmec, s_idx: int, transits: int, alpha0: float, res: int
     )
 
     fig.add_trace(
-        go.Scatter(x=zeta_long, y=b_flat, mode="lines", line=dict(width=0.5, color="#3bc9db"), name="|B| Trace"),
+        go.Scatter(x=zeta_long, y=b_flat, mode="lines", line=dict(width=0.5, color=theme.palette.line), name="|B| Trace"),
         row=2,
         col=1,
     )

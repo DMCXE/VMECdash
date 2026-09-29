@@ -34,9 +34,19 @@
               <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><path d="M2.5 4h11M2.5 8h11M2.5 12h11"/></svg>
             </button>
             <h1 id="viewTitle" class="view-title">VMECdash</h1>
+            <span class="file-meta">
+              <span id="fileName" class="file-name"></span>
+              <span id="fileTime" class="file-time"></span>
+            </span>
           </span>
           <span class="topbar-right">
             <span id="status" class="status-pill"></span>
+            <button id="exportFigure" class="icon-btn" title="Export figure" aria-label="Export figure">
+              <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M1.8 5.2h2.4l1-1.6h3.6l1 1.6h2.4a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1H1.8a1 1 0 0 1-1-1v-6a1 1 0 0 1 1-1Z"/><circle cx="7" cy="9" r="2.4"/></svg>
+            </button>
+            <button id="refreshBtn" class="icon-btn" title="Reload from disk" aria-label="Reload from disk">
+              <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M13.7 8a5.7 5.7 0 1 1-1.75-4.1"/><path d="M14 2v3.8h-3.8"/></svg>
+            </button>
             <button id="controlsToggle" class="icon-btn controls-toggle" title="Toggle controls" aria-label="Toggle controls" aria-expanded="false">
               <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><path d="M2 4.5h8M12.5 4.5H14"/><circle cx="10.5" cy="4.5" r="1.6"/><path d="M2 11.5h1.5M6 11.5h8"/><circle cx="4.2" cy="11.5" r="1.6"/></svg>
             </button>

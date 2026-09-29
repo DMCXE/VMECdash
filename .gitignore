@@ -14,3 +14,12 @@ extension/out/
 
 # macOS
 .DS_Store
+
+# Test / lint caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Virtual environments
+.venv/
+venv/

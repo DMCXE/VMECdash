@@ -75,13 +75,18 @@ def test_visible_when_shipped_in_schema():
         for view in schema["views"]
         for control in view["controls"]
     }
+    # LPK is a viewpoint on the cross-section, so it only hides what it actually takes
+    # over: the angle slider and the surface count. The colour variable still applies.
     expected = {
-        ("2d", "phi"): {"type2d": "cross_section"},
-        ("2d", "geoCount"): {"type2d": "cross_section", "var2d": "geometry"},
+        ("2d", "lpkMode"): {"type2d": "cross_section"},
+        ("2d", "phi"): {"type2d": "cross_section", "lpkMode": False},
+        ("2d", "geoCount"): {"type2d": "cross_section", "var2d": "geometry", "lpkMode": False},
         ("fieldline", "fieldlineNLines"): {"fieldlineType": "1d_lines"},
         ("fieldline", "fieldlineTransits"): {"fieldlineType": "single_trace"},
         ("fieldline", "fieldlineAlpha0"): {"fieldlineType": "single_trace"},
         ("fieldline", "fieldlineZetaShift"): {"fieldlineType": ["2d_modB", "1d_lines"]},
+        ("fieldline", "contourStyle"): {"fieldlineType": "2d_modB"},
+        ("fieldline", "contourLines"): {"fieldlineType": "2d_modB"},
     }
     for key, rule in expected.items():
         assert visible_when[key] == rule
@@ -108,7 +113,8 @@ def test_visible_when_references_valid_sibling_controls():
 def test_health_features_derived_from_registry():
     backend = VmecDashBackend()
     features = backend.health()["features"]
-    assert features == list(view_schema.VIEWS) + ["exportReport"]
+    # Every view is advertised, in registry order, followed by the non-view capabilities.
+    assert features == list(view_schema.VIEWS) + ["exportReport", "refresh"]
 
 
 def test_render_view_serializes_without_nonfinite():

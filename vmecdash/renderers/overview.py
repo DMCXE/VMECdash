@@ -7,15 +7,16 @@ from plotly.subplots import make_subplots
 
 from vmecdash.theme import PlotTheme
 
-# Dashboard panels, in order. Each entry is (profile key, subplot title, trace name, color).
-# Edit this one list to change which profiles the Summary Dashboard shows.
+# Dashboard panels, in order. Each entry is (profile key, subplot title, trace name).
+# Edit this one list to change which profiles the Summary Dashboard shows; the colours
+# come from the theme's palette, indexed in this same order.
 OVERVIEW_PROFILES = (
-    ("iotaf", "Rotational Transform (iota)", "iota", "#22b8cf"),
-    ("q", "Safety Factor (q)", "q", "#fd7e14"),
-    ("presf", "Pressure Profile", "pres", "#fa5252"),
-    ("dpds", "dP/ds", "dP/ds", "#12b886"),
-    ("vp", "Volume Derivative (Vp)", "Vp", "#7950f2"),
-    ("bdotb", "Flux Avg <B.B>", "<B.B>", "#0ca678"),
+    ("iotaf", "Rotational Transform (iota)", "iota"),
+    ("q", "Safety Factor (q)", "q"),
+    ("presf", "Pressure Profile", "pres"),
+    ("dpds", "dP/ds", "dP/ds"),
+    ("vp", "Volume Derivative (Vp)", "Vp"),
+    ("bdotb", "Flux Avg <B.B>", "<B.B>"),
 )
 _OVERVIEW_COLS = 3
 
@@ -25,7 +26,7 @@ def overview_figure(vmec, theme: PlotTheme) -> go.Figure:
     fig = make_subplots(
         rows=rows,
         cols=_OVERVIEW_COLS,
-        subplot_titles=tuple(title for _, title, _, _ in OVERVIEW_PROFILES),
+        subplot_titles=tuple(title for _, title, _ in OVERVIEW_PROFILES),
         vertical_spacing=0.15,
         horizontal_spacing=0.08,
     )
@@ -36,8 +37,10 @@ def overview_figure(vmec, theme: PlotTheme) -> go.Figure:
         except Exception:
             return [], []
 
-    for index, (key, _title, name, color) in enumerate(OVERVIEW_PROFILES):
+    colorway = theme.palette.colorway
+    for index, (key, _title, name) in enumerate(OVERVIEW_PROFILES):
         s_values, y_values = get_data_safe(key)
+        color = colorway[index % len(colorway)]
         row = index // _OVERVIEW_COLS + 1
         col = index % _OVERVIEW_COLS + 1
         fig.add_trace(

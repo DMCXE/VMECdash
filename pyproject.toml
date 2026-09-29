@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vmecdash"
-version = "0.1.5"
+version = "0.2.0"
 description = "Dash and VS Code tooling for inspecting VMEC wout NetCDF equilibria"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -13,7 +13,11 @@ authors = [{ name = "USTC Stellarator Lab" }]
 maintainers = [{ name = "Hengqian Liu" }]
 keywords = ["vmec", "stellarator", "plasma", "equilibrium", "netcdf", "plotly", "fusion"]
 classifiers = [
+  "Development Status :: 4 - Beta",
   "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
   "License :: OSI Approved :: MIT License",
   "Operating System :: OS Independent",
   "Intended Audience :: Science/Research",
@@ -36,6 +40,7 @@ dash = [
 ]
 dev = [
   "pytest>=8",
+  "ruff>=0.6",
 ]
 
 [project.scripts]
@@ -45,6 +50,7 @@ vmecdash = "vmecdash.cli:main"
 Homepage = "https://github.com/DMCXE/VMECdash"
 Repository = "https://github.com/DMCXE/VMECdash"
 Issues = "https://github.com/DMCXE/VMECdash/issues"
+Changelog = "https://github.com/DMCXE/VMECdash/blob/regularize/CHANGELOG.md"
 
 [tool.setuptools.packages.find]
 where = ["."]
@@ -52,3 +58,32 @@ include = ["vmecdash*"]
 
 [tool.setuptools.package-data]
 vmecdash = ["py.typed", "dash_app/assets/*.png"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+filterwarnings = [
+  # simsopt divides by sqrt(s), which is zero on the magnetic axis, inside its own
+  # reference geometry helper. Not ours to fix, and it does not affect the comparison.
+  "ignore:invalid value encountered in divide:RuntimeWarning",
+]
+
+[tool.ruff]
+line-length = 110
+target-version = "py310"
+extend-exclude = [
+  "extension",
+  "helper_tools",
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = [
+  "E501",   # line length is handled by the formatter
+  "B008",   # Plotly/Dash layouts legitimately call constructors in argument position
+  "UP038",  # isinstance(x, (A, B)) reads better here than the PEP 604 union form
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests insert the repo root on sys.path before importing the package.
+"tests/*" = ["E402"]

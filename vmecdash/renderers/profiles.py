@@ -17,7 +17,7 @@ def render_profile(vmec, var_name: str, theme: PlotTheme):
         s, y = vmec.get_1d_data(var)
         title = f"Profile: {var}"
         y_label = var
-        color = "#3bc9db"
+        color = theme.palette.line
 
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=s, y=y, mode="lines", line=dict(color=color, width=4)))

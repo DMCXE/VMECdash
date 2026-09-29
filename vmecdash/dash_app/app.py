@@ -6,7 +6,7 @@ from pathlib import Path
 import dash
 import dash_mantine_components as dmc
 import numpy as np
-from dash import Input, Output, State, ctx, dcc, html, _dash_renderer
+from dash import Input, Output, State, _dash_renderer, ctx, dcc, html
 
 from vmecdash import stats as vmec_stats
 from vmecdash.core import VMECJaxProcessor
@@ -18,16 +18,25 @@ from vmecdash.dash_app.cards import (
     overview_stats_cards,
     unique_options,
 )
-from vmecdash.dash_app.controls import fieldline_controls, overview_controls, profiles_controls, three_d_controls, two_d_controls
+from vmecdash.dash_app.controls import (
+    display_controls,
+    fieldline_controls,
+    grid_control,
+    overview_controls,
+    profiles_controls,
+    three_d_controls,
+    two_d_controls,
+)
 from vmecdash.renderers import fieldline, profiles, three_d, two_d
 from vmecdash.renderers.overview import overview_figure
 from vmecdash.theme import build_theme, make_empty_figure
+from vmecdash.view_schema import apply_grid
 
-# 设置 React 版本 
+# 设置 React 版本
 _dash_renderer._set_react_version("18.2.0")
 
 app = dash.Dash(
-    __name__, 
+    __name__,
     title="VMEC Dashboard",
     suppress_callback_exceptions=True,
     external_stylesheets=dmc.styles.ALL,
@@ -39,12 +48,14 @@ server = app.server
 # -----------------------
 # 1. UI Helpers
 # -----------------------
-# Shared UI helpers now live in ui/components.py. Feature-specific helpers sit
-# in the views/ modules to make it easy to add new plot types.
+# Control panels live in dash_app/controls.py and stat cards in dash_app/cards.py.
+# Figures come from vmecdash/renderers, shared with the VS Code backend.
 
 # -----------------------
 # 2. Control Panels (Hidden Strategy)
 # -----------------------
+controls_display = display_controls()
+controls_grid = grid_control()
 controls_overview = overview_controls()
 controls_1d = profiles_controls()
 controls_2d = two_d_controls()
@@ -119,7 +130,7 @@ app.layout = dmc.MantineProvider(
                                     color="cyan",
                                     size="md"
                                 ),
-                                
+
                                 # dmc.ActionIcon(get_icon("mdi:github"), variant="subtle", color="gray"),
                                 # dmc.ActionIcon(get_icon("mdi:bell"), variant="subtle", color="gray"),
                                 # dmc.Avatar(radius="xl", color="cyan", children="VM")
@@ -151,8 +162,20 @@ app.layout = dmc.MantineProvider(
                         create_nav_link("3D Geometry", "mdi:shape-outline", "nav-3d", "Boundary surfaces"),
                         create_nav_link("Field Lines", "mdi:vector-curve", "nav-fieldline", "Trace & |B|"),
                         dmc.Divider(label="Utilities", labelPosition="center", my="md"),
+                        dmc.Select(
+                            id="ctrl-export-format",
+                            label="Figure format",
+                            value="svg",
+                            data=[
+                                {"value": "svg", "label": "SVG (vector)"},
+                                {"value": "png", "label": "PNG (2x)"},
+                            ],
+                            allowDeselect=False,
+                            mb="xs",
+                            size="sm",
+                        ),
                         dmc.Button(
-                            "High-Res Screenshot",
+                            "Export Figure",
                             id="btn-download",
                             variant="light",
                             color="gray",
@@ -168,12 +191,17 @@ app.layout = dmc.MantineProvider(
                     p="md",
                     children=[
                         dmc.Group([get_icon("mdi:tune", 20), dmc.Text("View Controls", fw=700)], mb="md"),
-                        dmc.Stack([
+                        # Mantine's Aside is position:fixed with overflow:visible, so a
+                        # long control set is simply clipped and unreachable without
+                        # resizing the window. 60px header + the group above it.
+                        dmc.ScrollArea(h="calc(100vh - 116px)", type="auto", children=dmc.Stack([
                             controls_overview,
                             controls_1d,
                             controls_2d,
                             controls_3d,
                             controls_fieldline,
+                            controls_display,
+                            controls_grid,
                             dmc.Alert(
                                 id="status-alert",
                                 title="Status",
@@ -183,7 +211,7 @@ app.layout = dmc.MantineProvider(
                                 hide=True,
                                 icon=get_icon("mdi:information-outline")
                             )
-                        ], gap="md")
+                        ], gap="md"))
                     ]
                 ),
 
@@ -222,7 +250,7 @@ app.layout = dmc.MantineProvider(
                                                 shadow="sm",
                                                 radius="md",
                                                 p="xl",
-                                                style={"backgroundColor": "#2e2e2e"},
+                                                style={"backgroundColor": "var(--mantine-color-body)"},
                                                 children=dmc.Stack(
                                                     [
                                                         dmc.ThemeIcon(get_icon("mdi:upload"), size="xl", radius="xl", color="cyan", variant="light"),
@@ -244,7 +272,7 @@ app.layout = dmc.MantineProvider(
                                             "display": "flex",
                                             "alignItems": "center",
                                             "justifyContent": "center",
-                                            "backgroundColor": "#2e2e2e",
+                                            "backgroundColor": "var(--mantine-color-body)",
                                         },
                                     ),
                                     style={
@@ -268,6 +296,66 @@ app.layout = dmc.MantineProvider(
 )
 
 # -----------------------
+# 2-D rendering (one path, two callers)
+# -----------------------
+def render_2d_figure(
+    vmec,
+    theme,
+    *,
+    type_2d,
+    var_2d,
+    phi_frac,
+    s_idx,
+    geo_count,
+    colormap=None,
+    res_2d=None,
+    contour_style="fill",
+    contour_lines=True,
+    lpk_mode=False,
+):
+    """Build the 2-D figure.
+
+    Both ``update_visualization`` and the phi-drag fast path ``update_cross_section_phi``
+    come through here. They used to carry separate copies of this logic, which meant a
+    control wired into one and not the other would silently revert the figure to defaults
+    the moment the user dragged the phi slider.
+    """
+    s_idx = int(s_idx) if s_idx is not None else vmec.ns - 1
+    field_map = {opt["value"]: opt.get("label", opt["value"]) for opt in vmec.available_fields()}
+    field_label = field_map.get(var_2d, var_2d)
+    res_u = None if res_2d in (None, "", "auto") else int(res_2d)
+
+    # Only consulted for the cross-section, so a stale True cannot leak into flux-surface.
+    # Mirrors the webview: LPK is never drawn where it has no meaning, whatever the switch says.
+    if type_2d == "cross_section" and lpk_mode and vmec.ntor > 0:
+        return two_d.render_lpk(
+            vmec, s_idx, theme, var_name=var_2d, field_label=field_label,
+            colormap=colormap, res_u=res_u, contour_lines=bool(contour_lines),
+        )
+
+    phi_angle = (phi_frac or 0.0) * (2 * np.pi / max(vmec.nfp, 1))
+
+    if type_2d == "cross_section":
+        if var_2d == "geometry":
+            return two_d.build_geometry_cross_section_figure(
+                vmec, phi_angle, s_idx, geo_count, theme.dark_mode,
+                theme.fig_template, theme.paper_bg, theme.plot_bg, theme.reset_seed,
+            )
+        return two_d.render_cross_section_field(
+            vmec, phi_angle, var_2d, field_label, theme,
+            colormap=colormap, res_u=res_u,
+            # A curvilinear carpet cannot be smooth-shaded; the UI hides the option, this
+            # coerces defensively if a stale value survives a switch.
+            contour_style="fill" if contour_style == "smooth" else contour_style,
+            contour_lines=contour_lines,
+        )
+    return two_d.render_flux_surface(
+        vmec, s_idx, var_2d, field_label, theme,
+        colormap=colormap, res_u=res_u, contour_style=contour_style, contour_lines=contour_lines,
+    )
+
+
+# -----------------------
 # 4. Callbacks
 # -----------------------
 
@@ -288,17 +376,20 @@ def handle_upload(contents_nav, contents_center, fname_nav, fname_center):
         contents, filename = contents_center, fname_center
     else:
         contents, filename = contents_nav, fname_nav
-    if not contents: return dash.no_update
+    if not contents:
+        return dash.no_update
     try:
         content_type, content_string = contents.split(',')
         decoded = base64.b64decode(content_string)
         fd, path = tempfile.mkstemp(suffix=".nc")
-        with os.fdopen(fd, 'wb') as f: f.write(decoded)
-        
+        with os.fdopen(fd, 'wb') as f:
+            f.write(decoded)
+
         vmec = VMECJaxProcessor.from_file(path)
         meta = {
             "ns": vmec.ns,
             "nfp": vmec.nfp,
+            "ntor": vmec.ntor,
             "profiles": vmec.available_profiles(),
             "computed_profiles": vmec.available_computed_profiles(),
             "fields": vmec.available_fields(),
@@ -337,6 +428,8 @@ def export_report(n_clicks, filepath):
 # 4.2 Populate Control Options
 @app.callback(
     [Output('ctrl-1d-var', 'children'),
+     Output('ctrl-2d-lpk', 'disabled'),
+     Output('ctrl-2d-lpk', 'checked'),
      Output('ctrl-2d-var', 'data'),
      Output('ctrl-3d-var', 'data'),
      Output('ctrl-s-idx', 'max'), Output('ctrl-s-idx', 'marks'), Output('ctrl-s-idx', 'value'),
@@ -346,8 +439,9 @@ def export_report(n_clicks, filepath):
     prevent_initial_call=True
 )
 def update_controls(meta):
-    if not meta: return dash.no_update
-    
+    if not meta:
+        return dash.no_update
+
     profiles_data = unique_options(build_select_data(meta.get('profiles', [])))
     computed_profiles = unique_options(build_select_data(meta.get('computed_profiles', [])))
     all_profile_options = unique_options(profiles_data + computed_profiles)
@@ -357,23 +451,31 @@ def update_controls(meta):
     )
 
     fields = unique_options(build_select_data(meta.get('fields', [])))
-    
+
     # 增加 Geometry 选项到 2D 颜色中（如果不在 fields 里）
     has_geometry = any(opt.get('value') == 'geometry' for opt in fields)
     fields_source = fields if has_geometry else [{"label": "Geometry Only (None)", "value": "geometry"}] + fields
     fields_2d = unique_options(fields_source)
-    
+
     ns = meta.get('ns', 2)
     max_s = max(0, ns - 1)
     marks = {0: 'Axis', max_s: 'Edge'}
     fl_min_s = 1 if max_s >= 1 else 0
     fl_marks = {fl_min_s: 'Near axis' if fl_min_s else 'Axis', max_s: 'Edge'}
-    
+
+    # Every toroidal cut of an axisymmetric device is identical, so LPK has nothing to
+    # compare. VMECplot gates its own LPK plot on the same condition.
+    lpk_disabled = int(meta.get('ntor', 0)) <= 0
+
     return (
-        profile_radios, 
-        fields_2d, 
-        fields, 
-        max_s, marks, max_s, 
+        profile_radios,
+        lpk_disabled,
+        # Disabling alone left a True from the previous file in force - and a disabled
+        # switch cannot be unchecked by the user.
+        False if lpk_disabled else dash.no_update,
+        fields_2d,
+        fields,
+        max_s, marks, max_s,
         max_s, marks, max_s,
         max_s, fl_marks, max_s
     )
@@ -381,16 +483,27 @@ def update_controls(meta):
 
 @app.callback(
     [Output('ctrl-phi', 'disabled'),
-     Output('group-geo-stride', 'style')],
+     Output('group-geo-stride', 'style'),
+     Output('group-2d-lpk', 'style'),
+     Output('group-shading', 'style')],
     Input('ctrl-2d-type', 'value'),
-    Input('ctrl-2d-var', 'value')
+    Input('ctrl-2d-var', 'value'),
+    Input('ctrl-2d-lpk', 'checked'),
+    Input('current-view', 'data')
 )
-def toggle_phi_slider(type_2d, var_name):
+def toggle_phi_slider(type_2d, var_name, lpk_mode, view):
     is_cross = (type_2d == 'cross_section')
-    is_geo = (var_name == 'geometry')
-    stride_style = {"display": "flex"} if (is_cross and is_geo) else {"display": "none"}
-    disabled = not is_cross
-    return disabled, stride_style
+    # group-shading is shared with the Field Lines view, so LPK may only hide it while the
+    # 2-D view is the one on screen.
+    is_lpk = bool(lpk_mode) and is_cross and view == '2d'
+    show = {"display": "flex"}
+    hide = {"display": "none"}
+    # LPK fixes its own three angles and draws one surface, so neither the phi slider nor
+    # the surface-count control has anything to drive.
+    stride_style = show if (is_cross and var_name == 'geometry' and not is_lpk) else hide
+    # The colour variable still applies under LPK; the contour shading controls do not.
+    shading_style = hide if is_lpk else show
+    return (not is_cross) or is_lpk, stride_style, (show if is_cross else hide), shading_style
 
 
 @app.callback(
@@ -410,7 +523,8 @@ def adjust_phi_updatemode(type_2d, var_name):
      Output('nav-overview', 'active'), Output('nav-1d', 'active'),
      Output('nav-2d', 'active'), Output('nav-3d', 'active'), Output('nav-fieldline', 'active'),
      Output('wrapper-overview', 'style'), Output('wrapper-1d', 'style'),
-     Output('wrapper-2d', 'style'), Output('wrapper-3d', 'style'), Output('wrapper-fieldline', 'style')],
+     Output('wrapper-2d', 'style'), Output('wrapper-3d', 'style'), Output('wrapper-fieldline', 'style'),
+     Output('wrapper-display', 'style')],
     [Input('nav-overview', 'n_clicks'),
      Input('nav-1d', 'n_clicks'),
      Input('nav-2d', 'n_clicks'),
@@ -428,26 +542,28 @@ def update_view(n1, n2, n3, n4, n5):
         "nav-fieldline": "fieldline"
     }
     view = view_map.get(ctx_id, "overview")
-    
+
     # Active states
     is_ov = (view == "overview")
     is_1d = (view == "1d")
     is_2d = (view == "2d")
     is_3d = (view == "3d")
     is_fl = (view == "fieldline")
-    
+
     # Styles
     show = {"display": "block"}
     hide = {"display": "none"}
-    
+
     return (
-        view, 
+        view,
         is_ov, is_1d, is_2d, is_3d, is_fl,
         show if is_ov else hide,
         show if is_1d else hide,
         show if is_2d else hide,
         show if is_3d else hide,
-        show if is_fl else hide
+        show if is_fl else hide,
+        # Colormap/resolution/shading do nothing on the summary dashboard or a 1-D profile.
+        show if (is_2d or is_3d or is_fl) else hide,
     )
 
 # Hide upload overlay / disable click-to-upload once a file is loaded
@@ -466,7 +582,7 @@ def toggle_overlay(filepath):
         "display": "flex",
         "alignItems": "center",
         "justifyContent": "center",
-        "backgroundColor": "#2e2e2e",
+        "backgroundColor": "var(--mantine-color-body)",
     }
     upload_style = {
         "position": "absolute",
@@ -497,6 +613,7 @@ def toggle_overlay(filepath):
      Input('ctrl-3d-var', 'value'),
      Input('ctrl-s3d-idx', 'value'),
      Input('ctrl-3d-bg', 'checked'),
+     Input('ctrl-res-3d', 'value'),
      Input('toggle-theme', 'checked'),
      Input('ctrl-geo-stride', 'value'),
      Input('ctrl-fl-type', 'value'),
@@ -505,13 +622,20 @@ def toggle_overlay(filepath):
      Input('ctrl-fl-transits', 'value'),
      Input('ctrl-fl-alpha0', 'value'),
      Input('ctrl-fl-res', 'value'),
-     Input('ctrl-fl-zeta-shift', 'checked')],
+     Input('ctrl-fl-zeta-shift', 'checked'),
+     Input('ctrl-colormap', 'value'),
+     Input('ctrl-res-2d', 'value'),
+     Input('ctrl-contour-style', 'value'),
+     Input('ctrl-contour-lines', 'checked'),
+     Input('ctrl-2d-lpk', 'checked'),
+     Input('ctrl-show-grid', 'checked')],
     State('vmec-meta', 'data'),
     State('ctrl-phi', 'value'),
     prevent_initial_call=True
 )
-def update_visualization(view, filepath, var_1d, type_2d, var_2d, s_2d, var_3d, s_3d, bg_3d, dark_mode, geo_count, 
+def update_visualization(view, filepath, var_1d, type_2d, var_2d, s_2d, var_3d, s_3d, bg_3d, res_3d, dark_mode, geo_count,
                          fl_type, fl_s_idx, fl_nlines, fl_transits, fl_alpha0, fl_res, fl_zeta_shift,
+                         colormap, res_2d, contour_style, contour_lines, lpk_mode, show_grid,
                          meta, phi_state):
     triggered = ctx.triggered_id
     if (
@@ -545,36 +669,29 @@ def update_visualization(view, filepath, var_1d, type_2d, var_2d, s_2d, var_3d, 
         # --------------------------
         if view == "overview":
             fig = overview_figure(vmec, theme)
-            return fig, overview_stats_cards(stats_payload)
+            return apply_grid(fig, bool(show_grid)), overview_stats_cards(stats_payload)
 
         # --------------------------
         # MODE: 1D PROFILES
         # --------------------------
         if view == "1d":
             fig = profiles.render_profile(vmec, var_1d, theme)
-            return fig, base_cards
+            return apply_grid(fig, bool(show_grid)), base_cards
 
         # --------------------------
         # MODE: 2D CROSS SECTION
         # --------------------------
         if view == "2d":
-            phi_val = phi_state if phi_state is not None else 0.0
-            phi_scale = 2 * np.pi / max(vmec.nfp, 1)
-            phi_angle = phi_val * phi_scale
-            s_idx = int(s_2d) if s_2d is not None else vmec.ns - 1
-            field_label = field_map.get(var_2d, var_2d)
-
-            if type_2d == "cross_section":
-                if var_2d == "geometry":
-                    fig = two_d.build_geometry_cross_section_figure(
-                        vmec, phi_angle, s_idx, geo_count, dark_mode, theme.fig_template, theme.paper_bg, theme.plot_bg, reset_seed
-                    )
-                    return fig, base_cards
-                fig = two_d.render_cross_section_field(vmec, phi_angle, var_2d, field_label, theme)
-                return fig, base_cards
-
-            fig = two_d.render_flux_surface(vmec, s_idx, var_2d, field_label, theme)
-            return fig, base_cards
+            fig = render_2d_figure(
+                vmec, theme,
+                type_2d=type_2d, var_2d=var_2d,
+                phi_frac=phi_state if phi_state is not None else 0.0,
+                s_idx=s_2d, geo_count=geo_count,
+                colormap=colormap, res_2d=res_2d,
+                contour_style=contour_style, contour_lines=contour_lines,
+                lpk_mode=bool(lpk_mode),
+            )
+            return apply_grid(fig, bool(show_grid)), base_cards
 
         # --------------------------
         # MODE: 3D GEOMETRY
@@ -584,8 +701,10 @@ def update_visualization(view, filepath, var_1d, type_2d, var_2d, s_2d, var_3d, 
             v_name = var_3d or "modB"
             coord_free = True if bg_3d is None else bool(bg_3d)
             field_label = field_map.get(v_name, v_name)
-            fig = three_d.render_3d(vmec, s_val, v_name, field_label, coord_free, theme)
-            return fig, base_cards
+            fig = three_d.render_3d(
+                vmec, s_val, v_name, field_label, coord_free, theme, colormap=colormap, resolution=res_3d
+            )
+            return apply_grid(fig, bool(show_grid)), base_cards
 
         # --------------------------
         # MODE: FIELD LINE
@@ -593,15 +712,20 @@ def update_visualization(view, filepath, var_1d, type_2d, var_2d, s_2d, var_3d, 
         if view == "fieldline":
             res = fl_res if fl_res else 128
             if fl_type == "2d_modB":
-                fig = fieldline.render_fieldline_heatmap(vmec, fl_s_idx, res, theme, shift_zeta=bool(fl_zeta_shift))
-                return fig, base_cards
+                fig = fieldline.render_fieldline_heatmap(
+                    vmec, fl_s_idx, res, theme, shift_zeta=bool(fl_zeta_shift),
+                    colormap=colormap, contour_style=contour_style, contour_lines=bool(contour_lines),
+                )
+                return apply_grid(fig, bool(show_grid)), base_cards
             if fl_type == "1d_lines":
                 n_lines = fl_nlines if fl_nlines else 6
                 fig = fieldline.render_fieldline_lines(vmec, fl_s_idx, n_lines, res, theme, shift_zeta=bool(fl_zeta_shift))
-                return fig, base_cards
+                return apply_grid(fig, bool(show_grid)), base_cards
             if fl_type == "single_trace":
-                fig = fieldline.render_single_trace(vmec, fl_s_idx, fl_transits, fl_alpha0, res, theme)
-                return fig, base_cards
+                fig = fieldline.render_single_trace(
+                    vmec, fl_s_idx, fl_transits, fl_alpha0, res, theme, colormap=colormap
+                )
+                return apply_grid(fig, bool(show_grid)), base_cards
     except Exception as e:
         print(f"Detailed Error: {e}")
         import traceback
@@ -670,7 +794,7 @@ app.clientside_callback(
 
 app.clientside_callback(
     """
-    function(n_clicks) {
+    function(n_clicks, fmt) {
         if (!n_clicks) {
             return window.dash_clientside.no_update;
         }
@@ -682,10 +806,14 @@ app.clientside_callback(
         if (!plot) {
             return window.dash_clientside.no_update;
         }
+        // Export at a fixed size rather than the on-screen size, so a figure bound for a
+        // paper does not inherit whatever width the browser window happened to have.
+        var format = fmt || 'svg';
         Plotly.downloadImage(plot, {
-            format: 'png',
+            format: format,
             width: 1400,
             height: 900,
+            scale: format === 'png' ? 2 : 1,
             filename: 'vmec_viz'
         });
         return window.dash_clientside.no_update;
@@ -693,6 +821,7 @@ app.clientside_callback(
     """,
     Output('btn-download', 'id'),
     Input('btn-download', 'n_clicks'),
+    State('ctrl-export-format', 'value'),
     prevent_initial_call=True
 )
 
@@ -707,27 +836,30 @@ app.clientside_callback(
     State('ctrl-geo-stride', 'value'),
     State('stored-filepath', 'data'),
     State('toggle-theme', 'checked'),
+    State('ctrl-colormap', 'value'),
+    State('ctrl-res-2d', 'value'),
+    State('ctrl-contour-style', 'value'),
+    State('ctrl-contour-lines', 'checked'),
+    State('ctrl-2d-lpk', 'checked'),
+    State('ctrl-show-grid', 'checked'),
     prevent_initial_call=True
 )
-def update_cross_section_phi(phi_val, view, type_2d, var_2d, s_idx, geo_count, filepath, dark_mode):
+def update_cross_section_phi(phi_val, view, type_2d, var_2d, s_idx, geo_count, filepath, dark_mode,
+                             colormap, res_2d, contour_style, contour_lines, lpk_mode, show_grid):
     if not (filepath and view == '2d' and type_2d == 'cross_section'):
         return dash.no_update
-    phi_val = phi_val or 0.0
     try:
         vmec = VMECJaxProcessor.from_file(filepath)
-        phi_scale = 2 * np.pi / max(vmec.nfp, 1)
-        phi_angle = phi_val * phi_scale
-        s_idx = int(s_idx) if s_idx is not None else vmec.ns - 1
-        dark_mode = True if dark_mode is None else bool(dark_mode)
-        theme = build_theme(dark_mode, 0)
-        if var_2d == 'geometry':
-            fig = two_d.build_geometry_cross_section_figure(
-                vmec, phi_angle, s_idx, geo_count, dark_mode, theme.fig_template, theme.paper_bg, theme.plot_bg, reset_seed=0
-            )
-            return fig
-        field_map = {opt["value"]: opt.get("label", opt["value"]) for opt in vmec.available_fields()}
-        field_label = field_map.get(var_2d, var_2d)
-        return two_d.render_cross_section_field(vmec, phi_angle, var_2d, field_label, theme)
+        theme = build_theme(True if dark_mode is None else bool(dark_mode), 0)
+        return apply_grid(render_2d_figure(
+            vmec, theme,
+            type_2d=type_2d, var_2d=var_2d, phi_frac=phi_val or 0.0,
+            s_idx=s_idx, geo_count=geo_count,
+            colormap=colormap, res_2d=res_2d,
+            contour_style=contour_style, contour_lines=bool(contour_lines),
+            lpk_mode=bool(lpk_mode),
+        ), bool(show_grid))
+
     except Exception as exc:
         print(f"Cross-section phi update error: {exc}")
         return dash.no_update
@@ -778,7 +910,7 @@ def update_s_btn(n_dec, n_inc, val, max_val):
 def toggle_fl_controls(fl_type):
     show = {"display": "flex"}
     hide = {"display": "none"}
-    
+
     if fl_type == '1d_lines':
         return show, hide, hide, {"display": "flex"}
     elif fl_type == 'single_trace':

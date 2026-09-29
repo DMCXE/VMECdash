@@ -4,6 +4,78 @@ import dash_mantine_components as dmc
 from dash import dcc, html
 
 from vmecdash.dash_app.cards import get_icon
+from vmecdash.theme import COLORMAP_OPTIONS
+from vmecdash.view_schema import RES_2D_OPTIONS, RES_3D_OPTIONS
+
+
+def display_controls():
+    """Presentation controls that outlive a view switch.
+
+    One set of ids rather than one per view: a colormap chosen while reading |B| in 2-D
+    should still be in force after switching to 3-D. This mirrors the webview, where
+    control state is keyed by control id rather than by view.
+    """
+    return dmc.Paper(
+        id="wrapper-display",
+        withBorder=True,
+        shadow="xs",
+        radius="md",
+        p="md",
+        # Starts hidden: the initial view is Overview, and update_view has
+        # prevent_initial_call=True so it cannot hide this on first paint.
+        style={"display": "none"},
+        children=[
+            dmc.Group([get_icon("mdi:palette-outline", 20), dmc.Text("Display", fw=700, size="sm")], gap="xs", mb="sm"),
+            dmc.Select(
+                id="ctrl-colormap",
+                label="Colormap",
+                description="Auto picks a diverging scale for signed fields",
+                value="auto",
+                data=[dict(opt) for opt in COLORMAP_OPTIONS],
+                allowDeselect=False,
+                mb="sm",
+                size="sm",
+            ),
+            dmc.Stack(
+                id="group-shading",
+                gap="sm",
+                children=[
+                    dmc.Select(
+                        id="ctrl-res-2d",
+                        label="Mesh Resolution",
+                        description="Costs transfer size, not render time",
+                        value="auto",
+                        data=[dict(opt) for opt in RES_2D_OPTIONS],
+                        allowDeselect=False,
+                        size="sm",
+                    ),
+                    dmc.Select(
+                        id="ctrl-contour-style",
+                        label="Shading",
+                        value="fill",
+                        data=[
+                            {"value": "fill", "label": "Filled bands"},
+                            {"value": "smooth", "label": "Smooth (θ-ζ only)"},
+                            {"value": "lines", "label": "Lines only"},
+                        ],
+                        allowDeselect=False,
+                        size="sm",
+                    ),
+                    dmc.Switch(id="ctrl-contour-lines", label="Contour lines", checked=True, color="cyan", size="sm"),
+                ],
+            ),
+        ],
+    )
+
+
+def grid_control():
+    return dmc.Switch(
+        id="ctrl-show-grid",
+        label="Background grid",
+        checked=False,
+        color="cyan",
+        size="sm",
+    )
 
 
 def overview_controls():
@@ -83,7 +155,23 @@ def two_d_controls():
                 mb="md",
                 allowDeselect=False,
             ),
-            dmc.Select(id="ctrl-2d-var", label="Color Variable", value="geometry", data=[], mb="md", allowDeselect=False),
+            html.Div(
+                id="group-2d-lpk",
+                children=dmc.Switch(
+                    id="ctrl-2d-lpk",
+                    label="LPK view",
+                    checked=False,
+                    color="cyan",
+                    size="sm",
+                    mb="md",
+                ),
+            ),
+            html.Div(
+                id="group-2d-var",
+                children=dmc.Select(
+                    id="ctrl-2d-var", label="Color Variable", value="geometry", data=[], mb="md", allowDeselect=False
+                ),
+            ),
             dmc.Stack(
                 [
                     dmc.Text("Toroidal Angle (Phi)", size="sm", fw=500),
@@ -155,6 +243,15 @@ def three_d_controls():
         children=[
             dmc.Text("Rendering 3D surfaces using the accelerated JAX backend.", size="sm", c="dimmed", mb="sm"),
             dmc.Select(id="ctrl-3d-var", label="Surface Color", value="modB", data=[], mb="md", allowDeselect=False),
+            dmc.Select(
+                id="ctrl-res-3d",
+                label="Mesh Resolution",
+                description="Points in θ, and in ζ per field period",
+                value="auto",
+                data=[dict(opt) for opt in RES_3D_OPTIONS],
+                allowDeselect=False,
+                mb="md",
+            ),
             dmc.Stack(
                 [
                     dmc.Text("Flux Surface (s)", size="sm", fw=500),

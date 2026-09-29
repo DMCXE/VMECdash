@@ -12,4 +12,4 @@ import os
 # on shared GPU clusters. Use setdefault so an explicit JAX_PLATFORMS (e.g. "cuda") wins.
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
-__version__ = "0.1.5"
+__version__ = "0.2.0"

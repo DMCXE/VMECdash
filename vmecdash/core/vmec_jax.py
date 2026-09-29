@@ -3,9 +3,11 @@ from __future__ import annotations
 import math
 import numbers
 import os
+import weakref
+from collections import OrderedDict
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from functools import partial
-from typing import Callable, Mapping
 
 import jax
 import jax.numpy as jnp
@@ -303,6 +305,29 @@ def compute_magnetic_well_profile(
     return np.asarray(s), np.asarray(well)
 
 
+@dataclass(frozen=True)
+class DerivedFieldSpec:
+    """A 2-D field assembled from several wout series rather than read from one.
+
+    Unlike FIELD_SPECS these have no Fourier coefficients of their own - they need the
+    geometry's angular derivatives, so they are evaluated by ``derived_values``.
+    """
+
+    key: str
+    label: str
+    category: str = "Derived"
+
+
+#: Labels follow VMECplot's notation, which is what the community reads.
+DERIVED_FIELD_SPECS: Mapping[str, DerivedFieldSpec] = {
+    "B_R": DerivedFieldSpec("B_R", "B_R (cylindrical)", category="Magnetic"),
+    "B_phi": DerivedFieldSpec("B_phi", "B_phi (cylindrical)", category="Magnetic"),
+    "B_Z": DerivedFieldSpec("B_Z", "B_Z (cylindrical)", category="Magnetic"),
+    "j_para": DerivedFieldSpec("j_para", "j-parallel", category="Current"),
+    "force_residual": DerivedFieldSpec("force_residual", "|JxB - grad p| [N/m^3]", category="Equilibrium"),
+}
+
+
 COMPUTED_PROFILE_SPECS: Mapping[str, ComputedProfileSpec] = {
     "magnetic_well": ComputedProfileSpec(
         key="magnetic_well",
@@ -313,6 +338,14 @@ COMPUTED_PROFILE_SPECS: Mapping[str, ComputedProfileSpec] = {
         color="#f59f00",
     ),
 }
+
+
+def _release_dataset(ds) -> None:
+    """Close a processor's netCDF dataset. Safe to call more than once."""
+    try:
+        ds.close()
+    except Exception:  # pragma: no cover - a dataset that cannot close is already gone
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -327,11 +360,19 @@ class VmecPostProcessor:
     this file and are shared across all public methods.
     """
 
-    _CACHE: dict[str, "VmecPostProcessor"] = {}
+    # Strong-reference LRU. Keeps recently used processors hot even when nothing else
+    # holds them, but is bounded so opening many wout files cannot grow without limit
+    # (each instance costs roughly 3x the wout file plus an open netCDF handle).
+    _CACHE: OrderedDict[str, VmecPostProcessor] = OrderedDict()
+    # Identity map. A processor that anything else still references - a live VS Code
+    # editor session, a caller holding the object - resolves to that same instance, so
+    # dropping it from _CACHE can never orphan a consumer or hand out a duplicate.
+    _LIVE: weakref.WeakValueDictionary[str, VmecPostProcessor] = weakref.WeakValueDictionary()
+    _CACHE_MAX: int = 8
 
     # ---- Construction -----------------------------------------------------
     @classmethod
-    def from_file(cls, nc_path: str) -> "VmecPostProcessor":
+    def from_file(cls, nc_path: str) -> VmecPostProcessor:
         """
         Create (or reuse) a processor from a VMEC NetCDF file.
 
@@ -340,12 +381,35 @@ class VmecPostProcessor:
         """
         path = os.path.abspath(nc_path)
         mtime = os.path.getmtime(path)
-        cached = cls._CACHE.get(path)
-        if cached and getattr(cached, "_mtime", None) == mtime:
-            return cached
+
+        existing = cls._LIVE.get(path)
+        if existing is not None and not existing._closed:
+            if getattr(existing, "_mtime", None) == mtime:
+                cls._touch(path, existing)
+                return existing
+            # The file changed on disk. Retire the stale instance by dropping our
+            # references only - never close it here. A consumer may still be holding
+            # it (a VS Code session renders from it until it refreshes), and closing
+            # it underneath them would break every later render.
+            cls._CACHE.pop(path, None)
+            cls._LIVE.pop(path, None)
+
         inst = cls(path)
-        cls._CACHE[path] = inst
+        cls._LIVE[path] = inst
+        cls._touch(path, inst)
         return inst
+
+    @classmethod
+    def _touch(cls, path: str, inst: VmecPostProcessor) -> None:
+        """Mark ``path`` most-recently-used, evicting the coldest entries past the cap."""
+        cache = cls._CACHE
+        cache.pop(path, None)
+        cache[path] = inst
+        while len(cache) > cls._CACHE_MAX:
+            # Drop the strong reference only. Anything still using the evicted
+            # processor keeps it alive through _LIVE; its dataset is released by the
+            # finalizer once the last reference really goes away.
+            cache.popitem(last=False)
 
     def __init__(self, nc_path: str):
         self.path = os.path.abspath(nc_path)
@@ -353,6 +417,10 @@ class VmecPostProcessor:
         self.ds = xr.open_dataset(self.path)
         self.ns = int(self.ds.sizes["radius"])
         self.nfp = int(np.asarray(self.ds["nfp"]).item())
+        # Toroidal mode count. ntor == 0 means axisymmetry, where every toroidal
+        # cross-section is identical - the UI uses this to hide views that would be
+        # degenerate, the way VMECplot gates its LPK plot.
+        self.ntor = int(np.asarray(self.ds["ntor"]).item()) if "ntor" in self.ds else 0
         self.lasym = self.ds["lasym__logical__"].values.astype(bool).item()
         self.xm = jnp.asarray(self.ds["xm"].values)
         self.xn = jnp.asarray(self.ds["xn"].values)
@@ -372,16 +440,37 @@ class VmecPostProcessor:
         self._computed_alias = {spec.label: key for key, spec in COMPUTED_PROFILE_SPECS.items()}
         self._theta_cache: dict[int, jnp.ndarray] = {}
         self._half_to_full_weights: np.ndarray | None = None
+        self._full_mesh_cache: dict[str, tuple] = {}
+        self._dp_ds: np.ndarray | None = None
         self._closed = False
+        # Release the netCDF handle when the last reference to this processor goes.
+        # The callback takes the dataset, never ``self`` - capturing ``self`` would
+        # keep the instance alive forever and the finalizer would never fire.
+        self._finalizer = weakref.finalize(self, _release_dataset, self.ds)
 
     def close(self) -> None:
         if self._closed:
             return
-        self.ds.close()
         self._closed = True
+        finalizer = getattr(self, "_finalizer", None)
+        if finalizer is not None:
+            finalizer()  # closes the dataset and marks itself dead
+        else:  # pragma: no cover - instances built without __init__
+            _release_dataset(self.ds)
+        # Closing the dataset reclaims the netCDF side only. The JAX coefficient
+        # arrays are the bulk of the footprint (~10 MB of ~16 MB for a 5.5 MB wout),
+        # so drop them too or eviction frees almost nothing.
+        self._field_pairs = {}
+        self._profile_arrays = {}
+        self._full_mesh_cache = {}
+        self._dp_ds = None
+        self._theta_cache = {}
+        self._half_to_full_weights = None
         cached = self._CACHE.get(self.path)
         if cached is self:
             self._CACHE.pop(self.path, None)
+        if self._LIVE.get(self.path) is self:
+            self._LIVE.pop(self.path, None)
 
     # ---- Small utilities ---------------------------------------------------
     @staticmethod
@@ -487,7 +576,7 @@ class VmecPostProcessor:
     # ---- Available variables ---------------------------------------------
     def available_profiles(self) -> list[dict]:
         payload = []
-        for key, spec in PROFILE_SPECS.items():
+        for spec in PROFILE_SPECS.values():
             src = spec.source
             if src and src in self._profile_arrays:
                 payload.append(spec.option())
@@ -495,6 +584,9 @@ class VmecPostProcessor:
 
     def available_computed_profiles(self) -> list[dict]:
         return [spec.option() for spec in COMPUTED_PROFILE_SPECS.values()]
+
+    def is_derived_field(self, var_name: str) -> bool:
+        return self._field_key(var_name) in DERIVED_FIELD_SPECS
 
     def available_fields(self) -> list[dict]:
         payload = []
@@ -504,6 +596,17 @@ class VmecPostProcessor:
                 continue
             if key in self._field_pairs:
                 payload.append(spec.option())
+        # Derived vector quantities need only the contravariant field (and, for the
+        # current-based ones, the current); offer them when their inputs are present.
+        has_field = "B^u" in self._field_pairs and "B^v" in self._field_pairs
+        has_current = "j^u" in self._field_pairs and "j^v" in self._field_pairs
+        # The force residual also needs sqrt(g) and the pressure profile; listing it
+        # without them would only fail once the reader selected it.
+        has_pressure = "jacobian" in self._field_pairs and self._profile_arrays.get("presf") is not None
+        requirements = {"j_para": has_current, "force_residual": has_current and has_pressure}
+        for key, spec in DERIVED_FIELD_SPECS.items():
+            if has_field and requirements.get(key, True):
+                payload.append({"value": spec.key, "label": spec.label, "category": spec.category})
         return payload
 
     # ---- Scalars / summary information -----------------------------------
@@ -655,6 +758,15 @@ class VmecPostProcessor:
         }
 
     def get_flux_surface_data(self, s_idx: int, var_name: str, res_u: int = 128, res_v: int = 128):
+        if self.is_derived_field(var_name):
+            idx = self._sanitize_s(s_idx)
+            theta = self._get_theta(res_u)
+            zeta = jnp.linspace(0.0, 2 * jnp.pi / self.nfp, res_v)
+            values = self.derived_values_grid(self._field_key(var_name), np.array([idx]), theta, zeta)
+            if values is None:
+                return None, None, None
+            return np.asarray(theta), np.asarray(zeta), values[0]
+
         payload = self._field_payload(var_name)
         if payload is None or payload.get("pair") is None:
             return None, None, None
@@ -664,8 +776,206 @@ class VmecPostProcessor:
         cos_coeffs, sin_coeffs = payload["pair"]
         cos_slice = cos_coeffs[idx]
         sin_slice = sin_coeffs[idx]
-        val = _jit_evaluate_2d_pair(cos_slice, sin_slice, payload["xm"], payload["xn"], theta, zeta)
+        val = _jit_pair_on_grid(cos_slice, sin_slice, payload["xm"], payload["xn"], theta, zeta)[0]
         return np.asarray(theta), np.asarray(zeta), np.asarray(val)
+
+    # ---- Derived vector quantities ----------------------------------------
+    #
+    # These are not stored in the wout file as their own Fourier series; they are built
+    # from the geometry derivatives plus the contravariant field and current. Everything
+    # below shares one evaluation routine so the half-mesh lift and the Nyquist mode
+    # bookkeeping happen in exactly one place.
+
+    def _full_mesh_pair(self, key: str, pair):
+        """Lift a half-mesh coefficient pair onto the full radial mesh.
+
+        Evaluation is linear in the coefficients, so lifting the coefficients gives the
+        same answer as lifting the evaluated values - and lets the result be cached.
+        """
+        if key not in HALF_MESH_FIELD_KEYS:
+            return pair
+        cached = self._full_mesh_cache.get(key)
+        if cached is not None:
+            return cached
+        cos_coeffs, sin_coeffs = pair
+        if cos_coeffs.shape[0] == self.ns:
+            cos_coeffs = cos_coeffs[1 : self.ns]
+            sin_coeffs = sin_coeffs[1 : self.ns]
+        else:
+            cos_coeffs = cos_coeffs[: self.ns - 1]
+            sin_coeffs = sin_coeffs[: self.ns - 1]
+        weights = jnp.asarray(self._half_to_full_radial_weights())
+        lifted = (weights @ cos_coeffs, weights @ sin_coeffs)
+        self._full_mesh_cache[key] = lifted
+        return lifted
+
+    def _field_pair_full_mesh(self, key: str):
+        """The named field's coefficient pair, on the full radial mesh, or ``None``.
+
+        Taken from ``_field_payload`` rather than ``_field_pairs``: that is the one place
+        that knows the right pair for every field. Lambda, for instance, keeps ``lmns``
+        through ``_lambda_pair`` where the generic ``_coeff_pair`` would zero it on a
+        stellarator-symmetric equilibrium - and the lift cache is keyed by field, so every
+        caller has to agree on the source.
+        """
+        payload = self._field_payload(key)
+        if payload is None or payload.get("pair") is None:
+            return None
+        return self._full_mesh_pair(payload["key"], payload["pair"])
+
+    def derived_values(self, key: str, s_indices, theta, zeta):
+        """
+        Evaluate a derived field at paired ``(theta, zeta)`` points -> ``(S, T)``.
+
+        ``theta`` and ``zeta`` are matched pointwise. This serves the R-Z cross-section
+        (zeta held constant) and the 3-D surface, where the point count stays small.
+        """
+        return self._derived(key, s_indices, theta, zeta, grid=False)
+
+    def derived_values_grid(self, key: str, s_indices, theta, zeta):
+        """
+        Evaluate a derived field on the full ``theta x zeta`` grid -> ``(S, Ntheta, Nzeta)``.
+
+        The theta-zeta surface view comes through here. Its point count grows with the
+        square of the resolution, which the paired-point path would turn into an
+        ``(nmodes, res**2)`` intermediate; the separable kernel never forms one.
+        """
+        return self._derived(key, s_indices, theta, zeta, grid=True)
+
+    def _derived(self, key: str, s_indices, theta, zeta, *, grid: bool):
+        if DERIVED_FIELD_SPECS.get(key) is None:
+            return None
+        if self._field_pair_full_mesh("B^u") is None or self._field_pair_full_mesh("B^v") is None:
+            return None
+
+        s_indices = np.atleast_1d(np.asarray(s_indices, dtype=int))
+        theta = jnp.asarray(theta, dtype=float)
+        zeta = jnp.asarray(zeta, dtype=float)
+        rc, rs = self.rmnc[s_indices], self.rmns[s_indices]
+        zc, zs = self.zmnc[s_indices], self.zmns[s_indices]
+
+        if grid:
+            def evaluate(cos_coeffs, sin_coeffs, xm, xn):
+                return _jit_pair_on_grid(cos_coeffs, sin_coeffs, xm, xn, theta, zeta)
+
+            m, n = self.xm, self.xn
+            # R = sum(rmnc cos A + rmns sin A), Z = sum(zmnc cos A + zmns sin A); the angular
+            # derivatives are the same sums with transformed coefficients.
+            r = evaluate(rc, rs, m, n)
+            r_t, r_v = evaluate(m * rs, -m * rc, m, n), evaluate(-n * rs, n * rc, m, n)
+            z_t, z_v = evaluate(m * zs, -m * zc, m, n), evaluate(-n * zs, n * zc, m, n)
+        else:
+            def evaluate(cos_coeffs, sin_coeffs, xm, xn):
+                return _jit_pair_at_points(cos_coeffs, sin_coeffs, xm, xn, theta, zeta)
+
+            r, _, r_t, r_v, z_t, z_v = _jit_geometry_derivatives(rc, rs, zs, zc, self.xm, self.xn, theta, zeta)
+
+        def field(name):
+            pair = self._field_pair_full_mesh(name)
+            if pair is None:
+                return None
+            # Field series carry Nyquist mode numbers while R and Z do not, so the two
+            # cannot share an angle matrix.
+            return evaluate(pair[0][s_indices], pair[1][s_indices], self.xm_nyq, self.xn_nyq)
+
+        return self._assemble_derived(key, s_indices, r, r_t, r_v, z_t, z_v, field)
+
+    def _assemble_derived(self, key: str, s_indices, r, r_t, r_v, z_t, z_v, field):
+        """Build a derived quantity from its primitives. Purely elementwise, so it works on
+        the paired ``(S, T)`` shape and the gridded ``(S, Ntheta, Nzeta)`` shape alike."""
+        b_u, b_v = field("B^u"), field("B^v")
+        # B = B^u e_theta + B^v e_zeta, and in the (R, phi, Z) orthonormal frame
+        # e_theta = (dR/dtheta, 0, dZ/dtheta), e_zeta = (dR/dzeta, R, dZ/dzeta).
+        b_r = b_u * r_t + b_v * r_v
+        b_z = b_u * z_t + b_v * z_v
+        b_phi = r * b_v  # the physical component; B^v is contravariant
+
+        if key == "B_R":
+            return np.asarray(b_r)
+        if key == "B_Z":
+            return np.asarray(b_z)
+        if key == "B_phi":
+            return np.asarray(b_phi)
+
+        j_u, j_v = field("j^u"), field("j^v")
+        if j_u is None or j_v is None:
+            return None
+        j_r = j_u * r_t + j_v * r_v
+        j_z = j_u * z_t + j_v * z_v
+        j_phi = r * j_v
+
+        if key == "j_para":
+            mod_b = jnp.sqrt(b_r * b_r + b_phi * b_phi + b_z * b_z)
+            j_dot_b = j_r * b_r + j_phi * b_phi + j_z * b_z
+            return np.asarray(jnp.where(mod_b > EPS, j_dot_b / mod_b, 0.0))
+
+        if key == "force_residual":
+            sqrt_g = field("jacobian")
+            dp = self._pressure_gradient()
+            if sqrt_g is None or dp is None:
+                return None
+            # F = J x B - grad(p). For a converged equilibrium this is zero to numerical
+            # noise, so it reads directly as a convergence diagnostic.
+            f_r = j_phi * b_z - j_z * b_phi
+            f_phi = j_z * b_r - j_r * b_z
+            f_z = j_r * b_phi - j_phi * b_r
+
+            # grad(p) = dp/ds * grad(s), with grad(s) = (e_theta x e_zeta) / sqrt(g).
+            cross_r = -r * z_t
+            cross_phi = -(r_t * z_v - z_t * r_v)
+            cross_z = r * r_t
+            # dp/ds is per surface; broadcast it over however many point axes follow.
+            dp_ds = jnp.asarray(dp)[s_indices].reshape((-1,) + (1,) * (sqrt_g.ndim - 1))
+            safe_g = jnp.where(jnp.abs(sqrt_g) > EPS, sqrt_g, jnp.nan)
+            grad_r = dp_ds * cross_r / safe_g
+            grad_phi = dp_ds * cross_phi / safe_g
+            grad_z = dp_ds * cross_z / safe_g
+
+            # Reported as a raw magnitude in N/m^3, not normalised by |grad p|: a great
+            # many VMEC runs are zero-beta (every example equilibrium to hand here is),
+            # and there the pressure gradient vanishes identically, so a ratio would be
+            # a division by zero dressed up as a diagnostic. The magnitude is always
+            # defined, and its structure is what the reader is looking at anyway.
+            return np.asarray(
+                jnp.sqrt((f_r - grad_r) ** 2 + (f_phi - grad_phi) ** 2 + (f_z - grad_z) ** 2)
+            )
+
+        return None
+
+    def _pressure_gradient(self) -> np.ndarray | None:
+        """dp/ds on the full radial mesh, or ``None`` when the file has no pressure profile."""
+        if self._dp_ds is None:
+            pres = self._profile_arrays.get("presf")
+            if pres is None:
+                return None
+            self._dp_ds = np.gradient(np.asarray(pres), np.asarray(self._s_grid))
+        return self._dp_ds
+
+    def get_surface_curve(self, s_idx: int, phi: float, res_u: int = 240):
+        """
+        The R-Z curve of one flux surface at one toroidal angle.
+
+        ``get_cross_section_data`` evaluates every sampled surface and has no way to ask
+        for a specific one; the LPK view wants a single surface at three angles, so it
+        would otherwise pay for the whole stack three times. ``phi`` is traced rather
+        than static, so repeated calls at different angles reuse one compilation.
+
+        The theta grid closes on itself (0 and 2*pi are both included), so the returned
+        curve can be drawn directly without repeating the first point.
+        """
+        idx = self._sanitize_s(s_idx)
+        theta = self._get_theta(res_u)
+        r, z = _jit_cross_section_batch(
+            self.rmnc[idx],
+            self.rmns[idx],
+            self.zmns[idx],
+            self.zmnc[idx],
+            self.xm,
+            self.xn,
+            theta,
+            float(phi),
+        )
+        return np.asarray(r[0]), np.asarray(z[0])
 
     def get_cross_section_data(self, phi: float, var_name: str, res_s: int = 48, res_u: int = 160):
         theta = self._get_theta(res_u)
@@ -700,8 +1010,9 @@ class VmecPostProcessor:
         data can be handed straight to a Plotly carpet contour. The outer ``s = 1`` ring is
         the exact LCFS, giving a clean boundary with no resampling onto a rectangular grid.
         """
-        payload = self._field_payload(var_name)
-        if payload is None or payload.get("pair") is None or payload.get("key") == "geometry":
+        derived = self.is_derived_field(var_name)
+        payload = None if derived else self._field_payload(var_name)
+        if not derived and (payload is None or payload.get("pair") is None or payload.get("key") == "geometry"):
             return None, None, None
 
         theta_nodes = jnp.linspace(0.0, 2 * jnp.pi, res_u + 1)
@@ -716,54 +1027,62 @@ class VmecPostProcessor:
             phi,
         )
 
-        cos_coeffs, sin_coeffs = payload["pair"]
-        if payload["key"] in HALF_MESH_FIELD_KEYS:
-            if cos_coeffs.shape[0] == self.ns:
-                cos_coeffs = cos_coeffs[1:self.ns]
-                sin_coeffs = sin_coeffs[1:self.ns]
-            else:
-                cos_coeffs = cos_coeffs[: self.ns - 1]
-                sin_coeffs = sin_coeffs[: self.ns - 1]
-            half_values = np.asarray(
-                _jit_evaluate_line_pair(cos_coeffs, sin_coeffs, payload["xm"], payload["xn"], theta_nodes, phi)
+        if derived:
+            values = self.derived_values(
+                self._field_key(var_name),
+                np.arange(self.ns),
+                theta_nodes,
+                jnp.full_like(theta_nodes, float(phi)),
             )
-            val_nodes = self._half_to_full_radial_weights() @ half_values
-        else:
-            val_nodes = np.array(
-                _jit_evaluate_line_pair(cos_coeffs, sin_coeffs, payload["xm"], payload["xn"], theta_nodes, phi)
-            )
+            if values is None:
+                return None, None, None
+            return np.asarray(r_nodes), np.asarray(z_nodes), _collapse_axis_node_values(values)
+
+        # Half-mesh fields are lifted onto the full radial mesh by the same cached helper
+        # the derived quantities use, so the two cannot drift apart - and the lift is
+        # computed once per file rather than on every change of phi.
+        cos_full, sin_full = self._full_mesh_pair(payload["key"], payload["pair"])
+        val_nodes = np.array(
+            _jit_evaluate_line_pair(cos_full, sin_full, payload["xm"], payload["xn"], theta_nodes, phi)
+        )
         val_nodes = _collapse_axis_node_values(val_nodes)
 
         return np.asarray(r_nodes), np.asarray(z_nodes), np.asarray(val_nodes)
 
     # ---- 3D geometry ------------------------------------------------------
-    def compute_3d_surface(self, s_idx: int = -1, var_name: str = "modB", resolution: int = 128):
+    def compute_3d_surface(
+        self, s_idx: int = -1, var_name: str = "modB", n_theta: int = 128, n_zeta_per_period: int = 128
+    ):
+        """
+        Sample one flux surface on a periodic ``theta x zeta`` grid over the whole torus.
+
+        Returns ``x, y, z, val``, each ``(n_theta, n_zeta_per_period * nfp)``. Neither angle
+        repeats its endpoint: the renderer closes the torus by wrapping its triangles, so a
+        duplicated seam row would only add a degenerate strip with one-sided normals.
+
+        Toroidal points scale with ``nfp`` so every field period gets the same sampling -
+        ``|B|`` varies at ``n * nfp`` along zeta, and a fixed total count leaves
+        high-``nfp`` devices visibly faceted.
+        """
         idx = self._sanitize_s(s_idx)
-        theta = self._get_theta(resolution)
-        phi = self._get_theta(resolution)
-        payload = self._field_payload(var_name)
-        xm_var, xn_var = self.xm, self.xn
-        var_cos = jnp.zeros_like(self.rmnc[idx])
-        var_sin = jnp.zeros_like(self.rmnc[idx])
-        if payload and payload.get("pair") is not None and payload.get("key") != "geometry":
-            var_cos_full, var_sin_full = payload["pair"]
-            var_cos = var_cos_full[idx]
-            var_sin = var_sin_full[idx]
-            xm_var, xn_var = payload["xm"], payload["xn"]
-        x, y, z, val = _jit_surface_3d(
-            self.rmnc[idx],
-            self.rmns[idx],
-            self.zmns[idx],
-            self.zmnc[idx],
-            var_cos,
-            var_sin,
-            self.xm,
-            self.xn,
-            xm_var,
-            xn_var,
-            theta,
-            phi,
-        )
+        theta = jnp.linspace(0.0, 2 * jnp.pi, int(n_theta), endpoint=False)
+        zeta = jnp.linspace(0.0, 2 * jnp.pi, int(n_zeta_per_period) * max(int(self.nfp), 1), endpoint=False)
+
+        r = _jit_pair_on_grid(self.rmnc[idx], self.rmns[idx], self.xm, self.xn, theta, zeta)[0]
+        z = _jit_pair_on_grid(self.zmnc[idx], self.zmns[idx], self.xm, self.xn, theta, zeta)[0]
+        x = r * jnp.cos(zeta)[None, :]
+        y = r * jnp.sin(zeta)[None, :]
+
+        val = jnp.zeros_like(r)
+        if self.is_derived_field(var_name):
+            values = self.derived_values_grid(self._field_key(var_name), np.array([idx]), theta, zeta)
+            if values is not None:
+                val = values[0]
+        else:
+            payload = self._field_payload(var_name)
+            if payload and payload.get("pair") is not None and payload.get("key") != "geometry":
+                var_cos, var_sin = payload["pair"]
+                val = _jit_pair_on_grid(var_cos[idx], var_sin[idx], payload["xm"], payload["xn"], theta, zeta)[0]
         return np.asarray(x), np.asarray(y), np.asarray(z), np.asarray(val)
 
     # ---- Field line tracing ----------------------------------------------
@@ -857,30 +1176,66 @@ def _jit_evaluate_line_pair(cos_coeffs, sin_coeffs, xm, xn, theta, phi):
 
 
 @jax.jit
-def _jit_evaluate_2d_pair(cos_coeffs, sin_coeffs, xm, xn, theta, zeta):
-    theta_grid, zeta_grid = jnp.meshgrid(theta, zeta, indexing="ij")
-    angle = (xm[:, None, None] * theta_grid[None, :, :]) - (xn[:, None, None] * zeta_grid[None, :, :])
-    cos_trig = jnp.cos(angle)
-    sin_trig = jnp.sin(angle)
-    return jnp.sum(cos_coeffs[:, None, None] * cos_trig + sin_coeffs[:, None, None] * sin_trig, axis=0)
+def _jit_geometry_derivatives(r_cos, r_sin, z_sin, z_cos, xm, xn, theta, zeta):
+    """``R``, ``Z`` and their angular derivatives at paired ``(theta, zeta)`` points.
+
+    ``theta`` and ``zeta`` are matched pointwise (both shape ``(T,)``); coefficient
+    arrays are ``(S, nmodes)``. Every return is ``(S, T)``.
+
+    With ``A = m*theta - n*zeta`` the derivatives are just the same sums with the
+    coefficient scaled by ``m`` or ``n`` and cosine swapped for sine. ``xn`` comes
+    straight from the wout file and already carries the field-period factor, so
+    ``d/dzeta`` picks it up with no extra ``nfp`` anywhere.
+    """
+    angle = (xm[:, None] * theta[None, :]) - (xn[:, None] * zeta[None, :])
+    cos_a = jnp.cos(angle)
+    sin_a = jnp.sin(angle)
+    m = xm[:, None]
+    n = xn[:, None]
+    r = (r_cos @ cos_a) + (r_sin @ sin_a)
+    z = (z_sin @ sin_a) + (z_cos @ cos_a)
+    dr_dtheta = (r_cos @ (-m * sin_a)) + (r_sin @ (m * cos_a))
+    dr_dzeta = (r_cos @ (n * sin_a)) + (r_sin @ (-n * cos_a))
+    dz_dtheta = (z_sin @ (m * cos_a)) + (z_cos @ (-m * sin_a))
+    dz_dzeta = (z_sin @ (-n * cos_a)) + (z_cos @ (n * sin_a))
+    return r, z, dr_dtheta, dr_dzeta, dz_dtheta, dz_dzeta
 
 
 @jax.jit
-def _jit_surface_3d(r_cos, r_sin, z_sin, z_cos, var_cos, var_sin, xm, xn, xm_var, xn_var, theta, phi):
-    theta_grid, phi_grid = jnp.meshgrid(theta, phi, indexing="ij")
-    angle_geom = (xm[:, None, None] * theta_grid[None, :, :]) - (xn[:, None, None] * phi_grid[None, :, :])
-    cos_geom = jnp.cos(angle_geom)
-    sin_geom = jnp.sin(angle_geom)
-    r = jnp.sum(r_cos[:, None, None] * cos_geom + r_sin[:, None, None] * sin_geom, axis=0)
-    z_val = jnp.sum(z_sin[:, None, None] * sin_geom + z_cos[:, None, None] * cos_geom, axis=0)
-    x_val = r * jnp.cos(phi_grid)
-    y_val = r * jnp.sin(phi_grid)
+def _jit_pair_at_points(cos_coeffs, sin_coeffs, xm, xn, theta, zeta):
+    """Evaluate one coefficient pair at paired ``(theta, zeta)`` points -> ``(S, T)``.
 
-    angle_var = (xm_var[:, None, None] * theta_grid[None, :, :]) - (xn_var[:, None, None] * phi_grid[None, :, :])
-    cos_var = jnp.cos(angle_var)
-    sin_var = jnp.sin(angle_var)
-    val = jnp.sum(var_cos[:, None, None] * cos_var + var_sin[:, None, None] * sin_var, axis=0)
-    return x_val, y_val, z_val, val
+    Kept separate from the geometry kernel because the field coefficients carry Nyquist
+    mode numbers while R and Z carry the plain ones, so the two cannot share an angle
+    matrix.
+    """
+    angle = (xm[:, None] * theta[None, :]) - (xn[:, None] * zeta[None, :])
+    return (cos_coeffs @ jnp.cos(angle)) + (sin_coeffs @ jnp.sin(angle))
+
+
+@jax.jit
+def _jit_pair_on_grid(cos_coeffs, sin_coeffs, xm, xn, theta, zeta):
+    """Evaluate a coefficient pair on the full ``theta x zeta`` grid -> ``(S, Ntheta, Nzeta)``.
+
+    Separable: cos(m*theta - n*zeta) = cos(m*theta)cos(n*zeta) + sin(m*theta)sin(n*zeta),
+    and likewise for sine, so the mode sum factors into an (M x Ntheta) matrix contracted
+    with an (M x Nzeta) one. The direct form materialises an (M, Ntheta, Nzeta) array -
+    3.8 GB per array on a 960 x 960 grid with 512 Nyquist modes - where this needs
+    O(M * (Ntheta + Nzeta)) plus the output.
+
+    Angular derivatives need no kernel of their own; transform the coefficients instead:
+    d/dtheta maps (c, s) to (m*s, -m*c), and d/dzeta maps (c, s) to (-n*s, n*c).
+    """
+    if cos_coeffs.ndim == 1:
+        cos_coeffs = cos_coeffs[None, :]
+        sin_coeffs = sin_coeffs[None, :]
+    m_theta = jnp.outer(xm, theta)
+    n_zeta = jnp.outer(xn, zeta)
+    cos_mt, sin_mt = jnp.cos(m_theta), jnp.sin(m_theta)
+    cos_nz, sin_nz = jnp.cos(n_zeta), jnp.sin(n_zeta)
+    a = cos_coeffs[:, :, None] * cos_mt[None] + sin_coeffs[:, :, None] * sin_mt[None]
+    b = cos_coeffs[:, :, None] * sin_mt[None] - sin_coeffs[:, :, None] * cos_mt[None]
+    return jnp.einsum("smt,mz->stz", a, cos_nz) + jnp.einsum("smt,mz->stz", b, sin_nz)
 
 
 # ----------------------------------------------------------------------

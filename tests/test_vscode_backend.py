@@ -4,7 +4,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
 EXAMPLE_WOUT = str(ROOT / "example" / "wout_PO.nc")
 
@@ -63,8 +62,7 @@ def test_backend_stdio_health_stdout_clean():
         [sys.executable, "-m", "vmecdash.vscode_backend", "--stdio"],
         input='{"id":1,"method":"health","params":{}}\n',
         text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         timeout=30,
         check=True,
     )
@@ -92,3 +90,45 @@ def test_figure_serialization_round_trips_without_nan():
     assert "NaN" not in encoded
     assert "Infinity" not in encoded
     assert json.loads(encoded)["figure"]["data"]
+
+
+def _reject_bare_constant(token):
+    raise AssertionError(f"bare {token} on the wire - JSON has no such literal")
+
+
+def test_stdio_splices_memoised_render_text():
+    """A render is serialized once and written as-is; a memo hit is byte-identical and
+    carries exactly what the in-process API returns."""
+    import os
+
+    from vmecdash.vscode_backend import VmecDashBackend, _session_id
+
+    path = os.path.abspath(EXAMPLE_WOUT)
+    session_id = _session_id(path, os.path.getmtime(path))
+    # Lambda's cross-section carries non-finite values at the axis: this exercises the
+    # sanitizing that used to run on every response and now runs once, before storage.
+    render = {"sessionId": session_id, "view": "2d", "controls": {"type2d": "cross_section", "var2d": "lambda"}, "theme": "dark"}
+    requests = [
+        {"id": 1, "method": "open", "params": {"path": path}},
+        {"id": 2, "method": "render", "params": render},
+        {"id": 3, "method": "render", "params": render},
+    ]
+    proc = subprocess.run(
+        [sys.executable, "-m", "vmecdash.vscode_backend", "--stdio"],
+        input="".join(json.dumps(request) + "\n" for request in requests),
+        text=True,
+        capture_output=True,
+        timeout=180,
+        check=True,
+    )
+    lines = [line for line in proc.stdout.splitlines() if line.strip()]
+    assert len(lines) == 3
+    responses = [json.loads(line, parse_constant=_reject_bare_constant) for line in lines]
+    assert [response["id"] for response in responses] == [1, 2, 3]
+    assert responses[0]["result"]["sessionId"] == session_id
+
+    assert lines[1].split('"result":', 1)[1] == lines[2].split('"result":', 1)[1]
+    backend = VmecDashBackend()
+    backend.open({"path": path})
+    assert responses[1]["result"] == backend.render(render)
+

@@ -22,6 +22,7 @@
     currentView: "overview",
     renderSerial: 0,
     controls: {},
+    stale: false,
   };
 
   const el = {
@@ -32,6 +33,10 @@
     controls: document.getElementById("controlBody"),
     viewTitle: document.getElementById("viewTitle"),
     loading: document.getElementById("loading"),
+    fileName: document.getElementById("fileName"),
+    fileTime: document.getElementById("fileTime"),
+    refresh: document.getElementById("refreshBtn"),
+    exportFigure: document.getElementById("exportFigure"),
   };
 
   const PLOT_CONFIG = { displaylogo: false, responsive: true, scrollZoom: true };
@@ -91,10 +96,53 @@
     });
   }
 
+  // A reloaded equilibrium can have a different ns, and the schema bakes the resolved
+  // slider maxima into the metadata. seedDefaults() only fills in *missing* values, so
+  // without this a slider left at surface 180 would survive into a file with 64 surfaces
+  // and silently address one that no longer exists.
+  function reconcileControls() {
+    views().forEach((view) => {
+      (view.controls || []).forEach((control) => {
+        const value = state.controls[control.id];
+        if (value === undefined) return;
+        if (control.kind === "slider" || control.kind === "number") {
+          let next = Number(value);
+          if (!Number.isFinite(next)) next = Number(control.default);
+          if (control.min !== null && control.min !== undefined) next = Math.max(Number(control.min), next);
+          if (control.max !== null && control.max !== undefined) next = Math.min(Number(control.max), next);
+          state.controls[control.id] = next;
+        } else if (control.kind === "select") {
+          const allowed = optionsFor(control).map((opt) => String(opt.value));
+          if (allowed.length && allowed.indexOf(String(value)) < 0) state.controls[control.id] = control.default;
+        }
+      });
+    });
+  }
+
+  function setFileMeta(meta) {
+    if (el.fileName) el.fileName.textContent = String(meta.path || "").split(/[\\/]/).pop() || "";
+    if (el.fileTime) {
+      const stamp = meta.mtime ? new Date(meta.mtime * 1000) : null;
+      el.fileTime.textContent = stamp ? stamp.toLocaleString() : "";
+      el.fileTime.title = stamp ? "Equilibrium last written " + stamp.toString() : "";
+    }
+  }
+
+  function setStale(on) {
+    state.stale = !!on;
+    if (el.refresh) {
+      el.refresh.classList.toggle("attention", state.stale);
+      el.refresh.title = state.stale ? "File changed on disk — reload" : "Reload from disk";
+    }
+  }
+
   // visibleWhen from the schema: {siblingCtrlId: valueOrList}; AND across keys, list = any-of.
   // Values are string-compared, matching how <option> selection is resolved.
   function isVisible(control) {
-    const cond = control.visibleWhen;
+    return matchesCondition(control.visibleWhen);
+  }
+
+  function matchesCondition(cond) {
     if (!cond) return true;
     return Object.keys(cond).every((id) => {
       const wanted = cond[id];
@@ -111,7 +159,7 @@
   }
 
   function optionsFor(spec) {
-    if (spec.options) return spec.options;
+    if (spec.options) return spec.options.filter((opt) => matchesCondition(opt.visibleWhen));
     const meta = state.meta || {};
     if (spec.optionsFrom === "fields") return meta.fields || [];
     if (spec.optionsFrom === "profiles") return [...(meta.profiles || []), ...(meta.computedProfiles || [])];
@@ -193,7 +241,15 @@
       el.controls.innerHTML = '<p class="control-empty">This view has no adjustable controls. It uses canonical VMEC profiles and scalar metadata.</p>';
       return;
     }
-    el.controls.innerHTML = spec.controls.filter(isVisible).map(renderControl).join("");
+    const shown = spec.controls.filter(isVisible);
+    shown.forEach((control) => {
+      if (control.kind !== "select") return;
+      const allowed = optionsFor(control).map((opt) => String(opt.value));
+      if (allowed.length && allowed.indexOf(String(state.controls[control.id])) < 0) {
+        state.controls[control.id] = control.default;
+      }
+    });
+    el.controls.innerHTML = shown.map(renderControl).join("");
     bindControls();
   }
 
@@ -238,6 +294,22 @@
   let renderInFlight = false;
   let renderQueued = null;
 
+  // The figure is rendered server-side with its colours baked into the payload, while the
+  // surrounding chrome is driven by var(--vscode-*) and re-resolves the instant VS Code
+  // switches theme. Without this the plot keeps the old background - text and chrome go
+  // light while the figure stays dark - until some control happens to trigger a render.
+  function currentTheme() {
+    return document.body.classList.contains("vscode-light") ? "light" : "dark";
+  }
+
+  let lastTheme = currentTheme();
+  new MutationObserver(function () {
+    const now = currentTheme();
+    if (now === lastTheme) return;
+    lastTheme = now;
+    requestRender({ silent: true });
+  }).observe(document.body, { attributes: true, attributeFilter: ["class"] });
+
   function requestRender(opts) {
     if (!state.sessionId) return;
     renderQueued = { serial: ++state.renderSerial, silent: !!(opts && opts.silent) };
@@ -256,7 +328,7 @@
       sessionId: state.sessionId,
       view: state.currentView,
       controls: state.controls,
-      theme: document.body.classList.contains("vscode-light") ? "light" : "dark",
+      theme: currentTheme(),
     });
   }
 
@@ -298,12 +370,46 @@
       state.meta = message.meta;
       state.schema = message.meta.schema;
       state.sessionId = message.meta.sessionId;
-      const first = views()[0];
-      if (first) state.currentView = first.id;
+      // Keep the reader where they were across a reload; only fall back if the view
+      // they were on no longer exists.
+      if (!views().some((view) => view.id === state.currentView)) {
+        const first = views()[0];
+        if (first) state.currentView = first.id;
+      }
       seedDefaults();
+      reconcileControls();
+      setFileMeta(message.meta);
+      setStale(false);
       renderNav();
       renderControls();
       requestRender();
+    } else if (message.type === "stale") {
+      if (message.auto) {
+        setStatus("Reloading…", "busy");
+        post("refresh", { sessionId: state.sessionId });
+      } else {
+        setStale(true);
+        setStatus("File changed — reload", "stale");
+      }
+    } else if (message.type === "renderImage") {
+      if (!plotReady) {
+        setStatus("Nothing to export yet", "error");
+        return;
+      }
+      setStatus("Exporting\u2026", "busy");
+      // Export at a fixed size rather than the pane size, so a figure bound for a paper
+      // does not inherit whatever width the editor happened to have.
+      Plotly.toImage(el.plot, { format: message.format, width: 1400, height: 900, scale: message.scale || 1 })
+        .then(function (dataUrl) {
+          post("figureImage", { dataUrl: dataUrl, format: message.format, view: state.currentView });
+          setStatus("Ready", "ok");
+        })
+        .catch(function (err) {
+          setStatus("Export failed: " + (err && err.message ? err.message : String(err)), "error");
+        });
+    } else if (message.type === "fresh") {
+      setStale(false);
+      setStatus("Up to date", "ok");
     } else if (message.type === "rendered") {
       renderInFlight = false;
       pumpRender();
@@ -319,7 +425,9 @@
           /* ignore */
         }
       });
-      setStatus("Ready", "ok");
+      // A render finishing does not make the on-disk file any less stale.
+      if (state.stale) setStatus("File changed — reload", "stale");
+      else setStatus("Ready", "ok");
     } else if (message.type === "error") {
       renderInFlight = false;
       pumpRender();
@@ -332,6 +440,17 @@
 
   const exportButton = document.getElementById("exportReport");
   if (exportButton) exportButton.addEventListener("click", () => post("exportReport", { sessionId: state.sessionId }));
+
+  if (el.exportFigure) {
+    el.exportFigure.addEventListener("click", () => post("exportFigure"));
+  }
+
+  if (el.refresh) {
+    el.refresh.addEventListener("click", () => {
+      setStatus("Reloading…", "busy");
+      post("refresh", { sessionId: state.sessionId });
+    });
+  }
 
   // ---- Layout states: auto-collapse from pane width (matchMedia), plus persisted manual
   // toggles that work at any width. navCollapsed stays undefined (= follow width) until the

@@ -1,5 +1,6 @@
 import * as cp from "child_process";
 import * as fs from "fs";
+import * as path from "path";
 import * as vscode from "vscode";
 
 export function activate(context: vscode.ExtensionContext) {
@@ -69,7 +70,23 @@ export function deactivate() {}
 type Pending = {
   resolve: (value: any) => void;
   reject: (reason?: any) => void;
+  timer?: NodeJS.Timeout;
 };
+
+/** An Error that carries the backend's error code, so callers can branch on it. */
+class BackendError extends Error {
+  constructor(
+    message: string,
+    readonly code?: string,
+  ) {
+    super(message);
+    this.name = "BackendError";
+  }
+}
+
+// Field-line renders at the highest resolution take a couple of seconds; allow generous
+// headroom, but never leave a request pending forever if the backend wedges.
+const REQUEST_TIMEOUT_MS = 120000;
 
 class BackendClient implements vscode.Disposable {
   private nextId = 1;
@@ -94,14 +111,33 @@ class BackendClient implements vscode.Disposable {
     const id = this.nextId++;
     const payload = JSON.stringify({ id, method, params: params || {} }) + "\n";
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new BackendError(`VMECdash backend did not answer "${method}" within ${REQUEST_TIMEOUT_MS / 1000}s.`, "TIMEOUT"));
+      }, REQUEST_TIMEOUT_MS);
+      this.pending.set(id, { resolve, reject, timer });
       child.stdin.write(payload, (error) => {
         if (error) {
-          this.pending.delete(id);
+          this.settle(id);
           reject(error);
         }
       });
     });
+  }
+
+  /** Remove a pending entry and clear its timeout. Returns it if it was still live. */
+  private settle(id: number): Pending | undefined {
+    const pending = this.pending.get(id);
+    if (!pending) return undefined;
+    if (pending.timer) clearTimeout(pending.timer);
+    this.pending.delete(id);
+    return pending;
+  }
+
+  private rejectAll(error: Error) {
+    for (const id of [...this.pending.keys()]) {
+      this.settle(id)?.reject(error);
+    }
   }
 
   private async ensureProcess(): Promise<cp.ChildProcessWithoutNullStreams> {
@@ -135,15 +171,11 @@ class BackendClient implements vscode.Disposable {
       console.error(`[vmecdash-backend] ${text}`);
     });
     child.on("error", (err) => {
-      const error = new Error(`Failed to start Python "${python}" (from ${source}): ${messageOf(err)}`);
-      for (const { reject } of this.pending.values()) reject(error);
-      this.pending.clear();
+      this.rejectAll(new Error(`Failed to start Python "${python}" (from ${source}): ${messageOf(err)}`));
       this.process = undefined;
     });
     child.on("exit", (code, signal) => {
-      const error = this.describeExit(code, signal, python, source);
-      for (const { reject } of this.pending.values()) reject(error);
-      this.pending.clear();
+      this.rejectAll(this.describeExit(code, signal, python, source));
       this.process = undefined;
     });
     return child;
@@ -177,11 +209,15 @@ class BackendClient implements vscode.Disposable {
         console.error(`Invalid VMECdash backend JSON: ${line}`);
         continue;
       }
-      const pending = this.pending.get(response.id);
+      const pending = this.settle(response.id);
       if (!pending) continue;
-      this.pending.delete(response.id);
-      if (response.error) pending.reject(new Error(response.error.message || response.error.code));
-      else pending.resolve(response.result);
+      if (response.error) {
+        // Keep the code alongside the message: the editor branches on SESSION_NOT_FOUND
+        // to recover transparently when the backend has been restarted.
+        pending.reject(new BackendError(response.error.message || response.error.code, response.error.code));
+      } else {
+        pending.resolve(response.result);
+      }
     }
   }
 }
@@ -204,23 +240,105 @@ class VmecDashEditorProvider implements vscode.CustomReadonlyEditorProvider<{ ur
     };
     webview.html = this.htmlFor(webview);
     let sessionId: string | undefined;
+
+    const openDocument = async () => {
+      const meta = await this.backend.request("open", { path: document.uri.fsPath });
+      sessionId = meta.sessionId;
+      return meta;
+    };
+    const renderOnce = (id: string | undefined, message: any) =>
+      this.backend.request("render", {
+        sessionId: id,
+        view: message.view,
+        controls: message.controls,
+        theme: message.theme,
+      });
+    const isMissingSession = (error: unknown) => error instanceof BackendError && error.code === "SESSION_NOT_FOUND";
+
+    // Tell the panel when the file changes underneath it. Auto-reload is opt-in: a
+    // running VMEC rewrites its wout repeatedly, and reloading mid-inspection would
+    // yank the view out from under whoever is reading it.
+    const watcher = vscode.workspace.createFileSystemWatcher(
+      new vscode.RelativePattern(vscode.Uri.file(path.dirname(document.uri.fsPath)), path.basename(document.uri.fsPath)),
+    );
+    const announceChange = () => {
+      const auto = vscode.workspace.getConfiguration("vmecdash").get<boolean>("autoReload") === true;
+      webview.postMessage({ type: "stale", auto });
+    };
+    watcher.onDidChange(announceChange);
+    watcher.onDidCreate(announceChange);
+
     webview.onDidReceiveMessage(async (message) => {
       try {
         if (message.type === "ready") {
           webview.postMessage({ type: "status", message: "Starting backend..." });
           const health = await this.backend.request("health", {});
           warnIfPlotlyUntested(health);
-          const meta = await this.backend.request("open", { path: document.uri.fsPath });
-          sessionId = meta.sessionId;
-          webview.postMessage({ type: "opened", meta });
+          webview.postMessage({ type: "opened", meta: await openDocument() });
+        } else if (message.type === "refresh") {
+          let meta: any;
+          try {
+            meta = await this.backend.request("refresh", { sessionId: sessionId ?? message.sessionId });
+          } catch (error) {
+            if (!isMissingSession(error)) throw error;
+            meta = { ...(await openDocument()), changed: true };
+          }
+          if (meta.changed) {
+            sessionId = meta.sessionId;
+            webview.postMessage({ type: "opened", meta });
+          } else {
+            webview.postMessage({ type: "fresh" });
+          }
         } else if (message.type === "render") {
-          const result = await this.backend.request("render", {
-            sessionId: message.sessionId,
-            view: message.view,
-            controls: message.controls,
-            theme: message.theme,
-          });
+          let result: any;
+          try {
+            result = await renderOnce(message.sessionId, message);
+          } catch (error) {
+            if (!isMissingSession(error)) throw error;
+            // The backend was restarted (Select Python Interpreter does this) or the
+            // session was retired. Re-open and retry once so the panel never dies.
+            const meta = await openDocument();
+            if (meta.sessionId !== message.sessionId) {
+              // The file also changed while we were away - hand back fresh metadata and
+              // let the webview re-render against the new schema.
+              webview.postMessage({ type: "opened", meta });
+              return;
+            }
+            result = await renderOnce(meta.sessionId, message);
+          }
           webview.postMessage({ type: "rendered", serial: message.serial, result });
+        } else if (message.type === "exportFigure") {
+          // Plotly's own download writes a blob from inside the page, which a VS Code
+          // webview blocks. Ask for the format here, have the webview rasterise, then
+          // save through the extension host - the same route exportReport already uses.
+          const picked = await vscode.window.showQuickPick(
+            [
+              { label: "SVG", description: "Vector - scales cleanly into a paper", format: "svg" },
+              { label: "PNG", description: "Bitmap at 2x scale", format: "png" },
+            ],
+            { placeHolder: "Export the current figure as" },
+          );
+          if (picked) {
+            webview.postMessage({ type: "renderImage", format: picked.format, scale: picked.format === "png" ? 2 : 1 });
+          }
+        } else if (message.type === "figureImage") {
+          const comma = String(message.dataUrl || "").indexOf(",");
+          if (comma < 0) throw new Error("The figure could not be rendered for export.");
+          const payload = String(message.dataUrl).slice(comma + 1);
+          // Plotly hands back SVG percent-encoded and raster formats base64-encoded.
+          const bytes =
+            message.format === "svg"
+              ? Buffer.from(decodeURIComponent(payload), "utf8")
+              : Buffer.from(payload, "base64");
+          const root = vscode.workspace.workspaceFolders?.[0]?.uri || document.uri;
+          const stem = path.basename(document.uri.fsPath).replace(/\.nc$/i, "");
+          const target = await vscode.window.showSaveDialog({
+            defaultUri: vscode.Uri.joinPath(root, `${stem}_${message.view || "figure"}.${message.format}`),
+          });
+          if (target) {
+            await vscode.workspace.fs.writeFile(target, bytes);
+            webview.postMessage({ type: "status", message: `Saved ${path.basename(target.fsPath)}` });
+          }
         } else if (message.type === "exportReport") {
           const report = await this.backend.request("exportReport", { sessionId: message.sessionId });
           const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri || document.uri;
@@ -234,6 +352,7 @@ class VmecDashEditorProvider implements vscode.CustomReadonlyEditorProvider<{ ur
       }
     });
     webviewPanel.onDidDispose(() => {
+      watcher.dispose();
       if (sessionId) this.backend.request("dispose", { sessionId }).catch(() => undefined);
     });
   }

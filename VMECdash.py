@@ -6,6 +6,9 @@ also expose a Dash-free backend for the VS Code extension.
 
 from vmecdash.dash_app.app import app, server
 
+# Re-exported for WSGI deployment, e.g. `gunicorn VMECdash:server`.
+__all__ = ["app", "server"]
+
 
 if __name__ == "__main__":
     app.run(debug=True)

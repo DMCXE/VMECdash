@@ -2,6 +2,14 @@
 
 **By [USTC Stellarator Lab](https://github.com/USTCstellarators) — MIT License**
 
+> [!TIP]
+> **Now available in VS Code.** VMECdash also runs as the backend of the
+> **[VMECdash Viewer](https://marketplace.visualstudio.com/items?itemName=HengqianLiu.vmecdash-viewer)**
+> extension, installable from the VS Code Marketplace. Run `pip install vmecdash` in the
+> Python environment VS Code uses, install the extension, then open a `wout*.nc` file with
+> **VMECdash: Open Preview** to inspect it without leaving the editor. It works over
+> Remote-SSH too. See [VS Code extension](#vs-code-extension).
+
 An interactive Dash application for exploring VMEC `wout_*.nc` stellarator equilibria.  
 It reconstructs magnetic surfaces with JAX, renders 1‑D/2‑D/3‑D plots and so on, motivated by the original MATLAB tool **VMECplot.m**.
 
@@ -59,22 +67,34 @@ vmecdash serve
 
 ---
 
-## VS Code Native Preview
+## VS Code Extension
 
-VMECdash now includes the first native VS Code integration surface:
+**[VMECdash Viewer](https://marketplace.visualstudio.com/items?itemName=HengqianLiu.vmecdash-viewer)**
+on the VS Code Marketplace previews VMEC equilibria inside the editor, using the `vmecdash`
+Python package as its backend.
+
+1. Install the backend in the Python environment VS Code uses: `pip install vmecdash`.
+2. Install **VMECdash Viewer** from the Extensions view (search "VMECdash").
+3. Open a `wout*.nc` file with **VMECdash: Open Preview** from the Command Palette, or
+   right-click it → *Open With…* → *VMECdash Preview*.
+
+If VS Code picks the wrong interpreter, run **VMECdash: Select Python Interpreter** or set
+`vmecdash.pythonPath`. Under Remote-SSH, install `vmecdash` in the remote environment.
+
+How it fits together:
 
 - a Dash-free Python backend at `python -m vmecdash.vscode_backend --stdio`;
-- a workspace VS Code extension under `extension/`;
+- the extension source under `extension/`;
 - a Custom Readonly Editor for `wout*.nc` files;
 - a Webview UI that renders backend Plotly figures with bundled `plotly.min.js`.
 
-For local development, install the Python package in the interpreter VS Code should use:
+For extension development, install the Python package in editable mode in the interpreter VS Code should use:
 
 ```bash
 pip install -e .
 ```
 
-Then open `extension/` as a VS Code extension development project or package it as a VSIX. In Remote-SSH, install `vmecdash` in the remote Python environment and set `vmecdash.pythonPath` if VS Code does not pick the desired interpreter.
+Then open `extension/` as a VS Code extension development project (F5 launches it) or package it as a VSIX.
 
 
 ---
@@ -96,14 +116,18 @@ For heavy 2‑D physics overlays, a pre-computation step runs on the server whil
 
 ## Repository Layout
 
-| Path               | Description                                                      |
-| ------------------ | ---------------------------------------------------------------- |
-| `VMECdash.py`| Main Dash entry point (layout + callbacks).                      |
-| `vmec_jax.py`      | JAX-powered data processor for VMEC equilibria.                  |
-| `views/`           | Modular UI components (overview, profiles, 2D/3D, fieldlines).  |
-| `ui/`              | Shared UI helper components.                                    |
-| `requirements.txt` | Python dependencies.                                             |
-| `example/wout_PO.nc`       | Example VMEC equilibrium (use your own files for new cases).     |
+| Path                          | Description                                                            |
+| ----------------------------- | ---------------------------------------------------------------------- |
+| `VMECdash.py`                 | Standalone Dash entry point (`python VMECdash.py`).                    |
+| `vmecdash/core/`              | JAX-powered data processor for VMEC equilibria.                        |
+| `vmecdash/renderers/`         | Plotly figure builders, shared by the Dash app and the VS Code backend. |
+| `vmecdash/view_schema.py`     | View and control registry that drives the VS Code webview.             |
+| `vmecdash/theme.py`           | Colour-scale policy, palettes and the Plotly template.                 |
+| `vmecdash/dash_app/`          | Dash layout, controls and callbacks.                                   |
+| `vmecdash/vscode_backend.py`  | Dash-free stdio backend for the VS Code extension.                     |
+| `extension/`                  | VS Code extension (TypeScript host + webview).                         |
+| `tests/`                      | Test suite (`pytest`).                                                 |
+| `example/wout_PO.nc`          | Example VMEC equilibrium (use your own files for new cases).           |
 
 ---
 
