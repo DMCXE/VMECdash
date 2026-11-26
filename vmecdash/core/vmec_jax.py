@@ -441,6 +441,8 @@ class VmecPostProcessor:
         self._theta_cache: dict[int, jnp.ndarray] = {}
         self._half_to_full_weights: np.ndarray | None = None
         self._full_mesh_cache: dict[str, tuple] = {}
+        self._monotonicity_cache: dict[tuple[int, int, int], dict] = {}
+        self._last_fieldline_diagnostics: dict | None = None
         self._dp_ds: np.ndarray | None = None
         self._closed = False
         # Release the netCDF handle when the last reference to this processor goes.
@@ -463,6 +465,8 @@ class VmecPostProcessor:
         self._field_pairs = {}
         self._profile_arrays = {}
         self._full_mesh_cache = {}
+        self._monotonicity_cache = {}
+        self._last_fieldline_diagnostics = None
         self._dp_ds = None
         self._theta_cache = {}
         self._half_to_full_weights = None
@@ -1085,6 +1089,60 @@ class VmecPostProcessor:
                 val = _jit_pair_on_grid(var_cos[idx], var_sin[idx], payload["xm"], payload["xn"], theta, zeta)[0]
         return np.asarray(x), np.asarray(y), np.asarray(z), np.asarray(val)
 
+    def half_mesh_s(self, s_idx: int) -> float:
+        """Normalized toroidal flux coordinate s of half-mesh surface ``s_idx`` (1..ns-1)."""
+        idx = self._sanitize_half_s(s_idx)
+        if self.ns <= 1:
+            return 0.0
+        return float((idx - 0.5) / (self.ns - 1))
+
+    def check_lambda_monotonicity(
+        self, s_idx: int, n_theta: int = 96, n_zeta: int = 96
+    ) -> dict:
+        """Evaluate 1 + d(lambda)/du on a uniform native (u, v) grid for one half-mesh surface.
+
+        Distinguishes:
+        - ``"folded"``: min(1 + lambda_u) < -1e-12
+        - ``"singular"``: |min(1 + lambda_u)| <= 1e-12
+        - ``"grid_insufficient"``: 0 < min(1 + lambda_u) <= Fourier inter-grid derivative bound
+        - ``"monotone"``: strictly positive and certified by the inter-grid derivative bound
+        - ``"nonfinite"``: non-finite lambda coefficients
+        """
+        idx = self._sanitize_half_s(s_idx)
+        n_theta_i = max(8, int(n_theta))
+        n_zeta_i = max(8, int(n_zeta))
+        cache_key = (idx, n_theta_i, n_zeta_i)
+        cached = self._monotonicity_cache.get(cache_key)
+        if cached is not None:
+            return dict(cached)
+
+        lambda_pair = self._lambda_pair()
+        if lambda_pair is None:
+            return {
+                "s_idx": idx,
+                "s_half": self.half_mesh_s(idx),
+                "status": "monotone",
+                "min_dtheta_star_du": 1.0,
+                "grid_derivative_bound": 0.0,
+                "bad_nodes": 0,
+                "total_nodes": n_theta_i * n_zeta_i,
+                "worst_u": 0.0,
+                "worst_v": 0.0,
+            }
+        lmnc_all, lmns_all = lambda_pair
+        lmnc = lmnc_all[idx]
+        lmns = lmns_all[idx]
+        xm_l = self.xm if lmnc.shape[-1] == self.xm.shape[0] else self.xm_nyq
+        xn_l = self.xn if lmnc.shape[-1] == self.xn.shape[0] else self.xn_nyq
+
+        info = _check_surface_lambda_monotonicity(
+            lmnc, lmns, xm_l, xn_l, self.nfp, n_theta=n_theta_i, n_zeta=n_zeta_i
+        )
+        info["s_idx"] = idx
+        info["s_half"] = self.half_mesh_s(idx)
+        self._monotonicity_cache[cache_key] = info
+        return dict(info)
+
     # ---- Field line tracing ----------------------------------------------
     def compute_field_line_properties(
         self,
@@ -1095,23 +1153,27 @@ class VmecPostProcessor:
         alpha0: float = 0.0,
         single_line: bool = False,
         zeta_offset: float = 0.0,
+        return_diagnostics: bool = False,
     ):
         """
         Compute |B| in (alpha, zeta) coordinates.
 
         If ``single_line`` is True, compute one field line over ``n_transits``.
         Otherwise compute a grid of alpha values on a single toroidal period.
+        Pass ``return_diagnostics=True`` to also receive a dict containing
+        surface monotonicity status, half-mesh flux coordinate ``s_half``,
+        ``iota``, and the boolean ``invalid_mask``.
         """
         idx = self._sanitize_half_s(s_idx)
         lambda_pair = self._lambda_pair()
         b_pair = self._coeff_pair("bmnc", "bmns")
         if lambda_pair is None or b_pair is None:
-            return None, None, None
+            return (None, None, None, None) if return_diagnostics else (None, None, None)
         lmnc, lmns = lambda_pair
         bmnc, bmns = b_pair
         iota_arr = jnp.asarray(self.ds["iotas"].values) if "iotas" in self.ds else self._profile_arrays.get("iotaf")
         if iota_arr is None:
-            return None, None, None
+            return (None, None, None, None) if return_diagnostics else (None, None, None)
         iota = iota_arr[idx]
 
         xm_l = self.xm if lmnc.shape[-1] == self.xm.shape[0] else self.xm_nyq
@@ -1119,6 +1181,7 @@ class VmecPostProcessor:
         xm_b = self.xm if bmnc.shape[-1] == self.xm.shape[0] else self.xm_nyq
         xn_b = self.xn if bmnc.shape[-1] == self.xn.shape[0] else self.xn_nyq
 
+        mono = self.check_lambda_monotonicity(idx)
         params = {
             "nfp": self.nfp,
             "iota": iota,
@@ -1135,15 +1198,53 @@ class VmecPostProcessor:
         zeta_max = 2.0 * jnp.pi / self.nfp
         zeta_grid = jnp.linspace(0.0, zeta_max, zeta_points, endpoint=False) + float(zeta_offset)
 
+        surface_invalid = mono["status"] in ("folded", "singular", "nonfinite")
+
         if single_line:
             n_transits = max(1, n_transits)
             alpha_segments = compute_shifted_alphas(alpha0, n_transits, params)
-            b_data = compute_all_grid(alpha_segments, zeta_grid, params)
-            return np.asarray(zeta_grid), np.asarray(alpha_segments), np.asarray(b_data)
+            if surface_invalid:
+                b_np = np.full((len(alpha_segments), len(zeta_grid)), np.nan, dtype=float)
+                invalid_mask = np.ones_like(b_np, dtype=bool)
+            else:
+                b_data, valid_mask = compute_all_grid_with_mask(alpha_segments, zeta_grid, params)
+                b_np = np.asarray(b_data, dtype=float)
+                invalid_mask = (~np.asarray(valid_mask, dtype=bool)) | (~np.isfinite(b_np))
+                b_np = np.where(invalid_mask, np.nan, b_np)
+            diag = {
+                **mono,
+                "iota": float(iota),
+                "nfp": int(self.nfp),
+                "invalid_mask": invalid_mask,
+                "n_invalid": int(np.sum(invalid_mask)),
+                "n_total": int(invalid_mask.size),
+            }
+            self._last_fieldline_diagnostics = diag
+            if return_diagnostics:
+                return np.asarray(zeta_grid), np.asarray(alpha_segments), b_np, diag
+            return np.asarray(zeta_grid), np.asarray(alpha_segments), b_np
 
         alpha_grid = jnp.linspace(0.0, 2.0 * jnp.pi, alpha_points, endpoint=False)
-        b_data = compute_all_grid(alpha_grid, zeta_grid, params)
-        return np.asarray(alpha_grid), np.asarray(zeta_grid), np.asarray(b_data)
+        if surface_invalid:
+            b_np = np.full((len(alpha_grid), len(zeta_grid)), np.nan, dtype=float)
+            invalid_mask = np.ones_like(b_np, dtype=bool)
+        else:
+            b_data, valid_mask = compute_all_grid_with_mask(alpha_grid, zeta_grid, params)
+            b_np = np.asarray(b_data, dtype=float)
+            invalid_mask = (~np.asarray(valid_mask, dtype=bool)) | (~np.isfinite(b_np))
+            b_np = np.where(invalid_mask, np.nan, b_np)
+        diag = {
+            **mono,
+            "iota": float(iota),
+            "nfp": int(self.nfp),
+            "invalid_mask": invalid_mask,
+            "n_invalid": int(np.sum(invalid_mask)),
+            "n_total": int(invalid_mask.size),
+        }
+        self._last_fieldline_diagnostics = diag
+        if return_diagnostics:
+            return np.asarray(alpha_grid), np.asarray(zeta_grid), b_np, diag
+        return np.asarray(alpha_grid), np.asarray(zeta_grid), b_np
 
 
 # ---------------------------------------------------------------------------
@@ -1239,8 +1340,70 @@ def _jit_pair_on_grid(cos_coeffs, sin_coeffs, xm, xn, theta, zeta):
 
 
 # ----------------------------------------------------------------------
-# Field line tracing kernels (from plot_az_jax.py)
+# Field line tracing kernels (bracketed Newton + pure bisection fallback)
 # ----------------------------------------------------------------------
+_TWO_PI = 2.0 * math.pi
+_SINGULAR_SLOPE_TOL = 1e-12
+_INVERT_ACCEPT_TOL = 1e-10
+_BISECT_ITERS = 48
+
+
+def _check_surface_lambda_monotonicity(
+    lmnc, lmns, xm_l, xn_l, nfp: int, *, n_theta: int = 96, n_zeta: int = 96
+) -> dict:
+    """Native uniform (u, v) monotonicity check for theta* = u + lambda(u, v)."""
+    lmnc_j = jnp.asarray(lmnc, dtype=jnp.float64)
+    lmns_j = jnp.asarray(lmns, dtype=jnp.float64)
+    xm_j = jnp.asarray(xm_l, dtype=jnp.float64)
+    xn_j = jnp.asarray(xn_l, dtype=jnp.float64)
+
+    u_grid = jnp.linspace(0.0, _TWO_PI, int(n_theta), endpoint=False)
+    v_grid = jnp.linspace(0.0, _TWO_PI / max(int(nfp), 1), int(n_zeta), endpoint=False)
+    # lambda = sum(c cos(mu - nv) + s sin(mu - nv)) => lambda_u = sum(m s cos - m c sin)
+    lam_u = _jit_pair_on_grid(xm_j * lmns_j, -xm_j * lmnc_j, xm_j, xn_j, u_grid, v_grid)[0]
+    slope = np.asarray(1.0 + lam_u, dtype=float)
+
+    xm_np = np.asarray(xm_j, dtype=float)
+    xn_np = np.asarray(xn_j, dtype=float)
+    amp_mn = np.hypot(np.asarray(lmnc_j, dtype=float), np.asarray(lmns_j, dtype=float))
+    du = _TWO_PI / int(n_theta)
+    dv = _TWO_PI / (max(int(nfp), 1) * int(n_zeta))
+    grid_bound = float(
+        0.5 * du * np.sum((xm_np**2) * amp_mn)
+        + 0.5 * dv * np.sum(np.abs(xm_np * xn_np) * amp_mn)
+    )
+
+    bad_mask = (~np.isfinite(slope)) | (slope <= _SINGULAR_SLOPE_TOL)
+    n_bad = int(np.sum(bad_mask))
+    if np.any(~np.isfinite(slope)) or not np.isfinite(grid_bound):
+        idx = np.argwhere(~np.isfinite(slope))[0] if np.any(~np.isfinite(slope)) else (0, 0)
+        min_slope = float("nan")
+        status = "nonfinite"
+    else:
+        idx = np.unravel_index(int(np.argmin(slope)), slope.shape)
+        min_slope = float(slope[idx])
+        if min_slope < -_SINGULAR_SLOPE_TOL:
+            status = "folded"
+        elif min_slope <= _SINGULAR_SLOPE_TOL:
+            status = "singular"
+        elif min_slope <= grid_bound:
+            status = "grid_insufficient"
+        else:
+            status = "monotone"
+
+    u_np = np.asarray(u_grid, dtype=float)
+    v_np = np.asarray(v_grid, dtype=float)
+    return {
+        "status": status,
+        "min_dtheta_star_du": min_slope,
+        "grid_derivative_bound": grid_bound,
+        "bad_nodes": n_bad,
+        "total_nodes": int(slope.size),
+        "worst_u": float(u_np[int(idx[0])]),
+        "worst_v": float(v_np[int(idx[1])]),
+    }
+
+
 @jax.jit
 def eval_Lambda(theta, zeta, xm, xn, lmnc, lmns):
     arg = xm * theta - xn * zeta
@@ -1260,27 +1423,173 @@ def residual_fn(theta, alpha, zeta, iota, xm_l, xn_l, lmnc, lmns):
 
 
 @partial(jax.jit, static_argnames=["max_iter"])
-def newton_solver(alpha, zeta, theta_init, iota, xm_l, xn_l, lmnc, lmns, tol=1e-12, max_iter=100):
-    def cond_fun(state):
-        _, diff, count = state
-        return (diff > tol) & (count < max_iter)
+def _solve_theta_star_verified(
+    alpha, zeta, theta_init, iota, xm_l, xn_l, lmnc, lmns, tol=1e-12, max_iter=20
+):
+    """Solve theta + lambda(theta, zeta) = alpha + iota * zeta with intersection safe bracket.
 
-    def body_fun(state):
-        theta, _, count = state
-        f_val, d_f_dtheta = jax.value_and_grad(residual_fn, argnums=0)(
-            theta, alpha, zeta, iota, xm_l, xn_l, lmnc, lmns
+    Works in local displacement x = theta - theta* with unwrapped residual
+    f(x) = x + lambda(theta* + x, zeta), bracketed Newton, and a 48-step pure
+    bisection fallback. Returns ``(theta_sol, valid)`` with ``NaN`` when invalid.
+    """
+    theta_star = alpha + iota * zeta
+    eps = jnp.finfo(jnp.float64).eps
+
+    amp_raw = jnp.sum(jnp.hypot(lmns, lmnc))
+    inputs_finite = jnp.isfinite(amp_raw) & jnp.isfinite(theta_star) & jnp.isfinite(zeta)
+    zero_lam = inputs_finite & (amp_raw == 0.0)
+
+    amp = jnp.where(inputs_finite, amp_raw, 0.0)
+    theta_safe = jnp.where(inputs_finite, theta_star, 0.0)
+    zeta_safe = jnp.where(inputs_finite, zeta, 0.0)
+    lmnc_safe = jnp.where(inputs_finite, lmnc, 0.0)
+    lmns_safe = jnp.where(inputs_finite, lmns, 0.0)
+
+    def eval_f(x):
+        u_raw = theta_safe + x
+        u_mod = u_raw - _TWO_PI * jnp.round(u_raw / _TWO_PI)
+        arg = xm_l * u_mod - xn_l * zeta_safe
+        c = jnp.cos(arg)
+        s = jnp.sin(arg)
+        lam = jnp.sum(lmnc_safe * c + lmns_safe * s)
+        lam_u = jnp.sum(xm_l * (-lmnc_safe * s + lmns_safe * c))
+        return x + lam, 1.0 + lam_u
+
+    # Periodic lift [2*pi*k, 2*pi*(k+1)] from lambda(0, zeta)
+    arg0 = -xn_l * zeta_safe
+    lam0 = jnp.sum(lmnc_safe * jnp.cos(arg0) + lmns_safe * jnp.sin(arg0))
+    k = jnp.floor((theta_safe - lam0) / _TWO_PI)
+    k = jnp.where(_TWO_PI * k + lam0 > theta_safe, k - 1.0, k)
+    k = jnp.where(_TWO_PI * (k + 1.0) + lam0 < theta_safe, k + 1.0, k)
+
+    pad_amp = 1e-12 * (1.0 + amp)
+    pad_per = 1e-9 * (1.0 + amp + jnp.abs(theta_safe))
+    lo = jnp.maximum(-(amp + pad_amp), _TWO_PI * k - theta_safe - pad_per)
+    hi = jnp.minimum(amp + pad_amp, _TWO_PI * (k + 1.0) - theta_safe + pad_per)
+
+    f_lo, _ = eval_f(lo)
+    f_hi, _ = eval_f(hi)
+    bracket_ok = (
+        inputs_finite
+        & jnp.isfinite(f_lo)
+        & jnp.isfinite(f_hi)
+        & (lo <= hi)
+        & (f_lo <= 0.0)
+        & (f_hi >= 0.0)
+    )
+
+    mid0 = 0.5 * (lo + hi)
+    x_guess = theta_init - theta_safe
+    guess_inside = jnp.isfinite(x_guess) & (x_guess > lo) & (x_guess < hi)
+    in_zero = (0.0 > lo) & (0.0 < hi)
+    at_lo = jnp.isfinite(f_lo) & (f_lo == 0.0) & ~guess_inside & ~in_zero
+    at_hi = jnp.isfinite(f_hi) & (f_hi == 0.0) & ~guess_inside & ~in_zero
+    x0 = jnp.where(
+        guess_inside,
+        x_guess,
+        jnp.where(at_lo, lo, jnp.where(at_hi, hi, jnp.where(in_zero, 0.0, mid0))),
+    )
+    x0 = jnp.where(bracket_ok, x0, 0.0)
+    lo0 = jnp.where(bracket_ok, lo, 0.0)
+    hi0 = jnp.where(bracket_ok, hi, 0.0)
+    done0 = ~bracket_ok | zero_lam | at_lo | at_hi
+
+    newton_budget = max(1, min(int(max_iter), 20))
+    stop_tol = jnp.minimum(jnp.asarray(tol, dtype=jnp.float64), 1e-13)
+
+    def newton_cond(state):
+        _, _, _, done, count = state
+        return (~done) & (count < newton_budget)
+
+    def newton_body(state):
+        x, b_lo, b_hi, done, count = state
+        f, denom = eval_f(x)
+        f_ok = jnp.isfinite(f)
+        slope_ok = jnp.isfinite(denom) & (denom > 0.0)
+        lo_new = jnp.where(f_ok & (f <= 0.0) & (x > b_lo), x, b_lo)
+        hi_new = jnp.where(f_ok & (f >= 0.0) & (x < b_hi), x, b_hi)
+
+        safe_denom = jnp.where(slope_ok, denom, 1.0)
+        x_newt = x - f / safe_denom
+        use_newt = (
+            slope_ok & jnp.isfinite(x_newt) & (x_newt > lo_new) & (x_newt < hi_new)
         )
-        step = -f_val / d_f_dtheta
-        theta_new = theta + step
-        return theta_new, jnp.abs(step), count + 1
+        x_next = jnp.where(use_newt, x_newt, 0.5 * (lo_new + hi_new))
 
-    init_state = (theta_init, 1.0, 0)
-    final_state = jax.lax.while_loop(cond_fun, body_fun, init_state)
-    return final_state[0]
+        f_floor = jnp.maximum(
+            stop_tol * jnp.minimum(1.0, jnp.maximum(denom, 0.0)),
+            4.0 * eps * (1.0 + amp + jnp.abs(theta_safe)) * jnp.minimum(1.0, jnp.maximum(denom, 0.0)),
+        )
+        tight = (hi_new - lo_new) <= 4.0 * eps * (1.0 + jnp.abs(x) + jnp.abs(theta_safe))
+        converged = f_ok & ((f == 0.0) | (slope_ok & (jnp.abs(f) <= f_floor)) | tight)
+        x_out = jnp.where(converged, x, x_next)
+        return (x_out, lo_new, hi_new, done | converged, count + 1)
+
+    x, lo, hi, _, _ = jax.lax.while_loop(
+        newton_cond, newton_body, (x0, lo0, hi0, done0, jnp.int32(0))
+    )
+
+    # Pure 48-step bisection fallback when bracketed Newton did not reach tolerance
+    f_end, _ = eval_f(x)
+    fallback_tol = jnp.maximum(
+        jnp.minimum(jnp.asarray(tol, dtype=jnp.float64), 1e-12),
+        32.0 * eps * (1.0 + amp + jnp.abs(theta_safe)),
+    )
+    need_bisect = (
+        bracket_ok
+        & ~zero_lam
+        & (~jnp.isfinite(x) | ~jnp.isfinite(f_end) | (jnp.abs(f_end) > fallback_tol))
+    )
+
+    def bisect_cond(state):
+        _, _, active, count = state
+        return active & (count < _BISECT_ITERS)
+
+    def bisect_body(state):
+        b_lo, b_hi, active, count = state
+        mid = 0.5 * (b_lo + b_hi)
+        f_mid, _ = eval_f(mid)
+        lo_next = jnp.where(f_mid < 0.0, mid, b_lo)
+        hi_next = jnp.where(f_mid >= 0.0, mid, b_hi)
+        return (lo_next, hi_next, active, count + 1)
+
+    b_lo, b_hi, _, _ = jax.lax.while_loop(
+        bisect_cond, bisect_body, (lo, hi, need_bisect, jnp.int32(0))
+    )
+    x = jnp.where(need_bisect, 0.5 * (b_lo + b_hi), x)
+    x = jnp.where(zero_lam, 0.0, x)
+
+    f_final, denom_final = eval_f(x)
+    accept_tol = jnp.maximum(
+        jnp.maximum(_INVERT_ACCEPT_TOL, jnp.asarray(tol, dtype=jnp.float64)),
+        1e-11 * (1.0 + amp),
+    )
+    slope_scale = jnp.sum(jnp.abs(xm_l) * jnp.hypot(lmns_safe, lmnc_safe))
+    slope_floor = jnp.maximum(1e-30, 16.0 * eps * (1.0 + slope_scale))
+    valid = inputs_finite & (
+        zero_lam
+        | (
+            bracket_ok
+            & jnp.isfinite(x)
+            & jnp.isfinite(f_final)
+            & (jnp.abs(f_final) <= accept_tol)
+            & jnp.isfinite(denom_final)
+            & (denom_final > slope_floor)
+        )
+    )
+    return jnp.where(valid, theta_safe + x, jnp.nan), valid
+
+
+@partial(jax.jit, static_argnames=["max_iter"])
+def newton_solver(alpha, zeta, theta_init, iota, xm_l, xn_l, lmnc, lmns, tol=1e-12, max_iter=100):
+    theta_sol, _ = _solve_theta_star_verified(
+        alpha, zeta, theta_init, iota, xm_l, xn_l, lmnc, lmns, tol=tol, max_iter=max_iter
+    )
+    return theta_sol
 
 
 @jax.jit
-def compute_field_line_scan(alpha, zeta_grid, params):
+def _compute_field_line_scan_with_mask(alpha, zeta_grid, params):
     iota = params["iota"]
     xm_l = params["xm_lambda"]
     xn_l = params["xn_lambda"]
@@ -1291,15 +1600,54 @@ def compute_field_line_scan(alpha, zeta_grid, params):
     bmnc = params["bmnc"]
     bmns = params["bmns"]
 
-    theta_init = alpha + iota * zeta_grid[0]
+    theta0 = alpha + iota * zeta_grid[0]
 
-    def scan_body(theta_prev, zeta):
-        theta_sol = newton_solver(alpha, zeta, theta_prev, iota, xm_l, xn_l, lmnc, lmns, tol=1e-12, max_iter=100)
-        b_val = eval_B(theta_sol, zeta, xm_b, xn_b, bmnc, bmns)
-        return theta_sol, b_val
+    def scan_body(carry, zeta):
+        theta_prev_valid, has_prev = carry
+        fresh_guess = alpha + iota * zeta
+        warm_guess = jnp.where(has_prev, theta_prev_valid, fresh_guess)
+        theta_sol, valid = _solve_theta_star_verified(
+            alpha, zeta, warm_guess, iota, xm_l, xn_l, lmnc, lmns, tol=1e-12, max_iter=20
+        )
+        # If warm-start failed acceptance, retry independently on this point's fresh safe bracket.
+        retry = (~valid) & has_prev
+        theta_retry, valid_retry = jax.lax.cond(
+            retry,
+            lambda: _solve_theta_star_verified(
+                alpha, zeta, fresh_guess, iota, xm_l, xn_l, lmnc, lmns, tol=1e-12, max_iter=20
+            ),
+            lambda: (theta_sol, valid),
+        )
+        final_valid = jnp.where(retry, valid_retry, valid)
+        final_theta = jnp.where(retry, theta_retry, theta_sol)
 
-    _, b_line = jax.lax.scan(scan_body, theta_init, zeta_grid)
+        safe_theta = jnp.where(final_valid, final_theta, 0.0)
+        b_raw = eval_B(safe_theta, zeta, xm_b, xn_b, bmnc, bmns)
+        point_valid = final_valid & jnp.isfinite(b_raw)
+        b_val = jnp.where(point_valid, b_raw, jnp.nan)
+
+        # Never propagate an unaccepted/bad root to subsequent scan steps.
+        next_prev = jnp.where(point_valid, final_theta, theta_prev_valid)
+        next_has = has_prev | point_valid
+        return (next_prev, next_has), (b_val, point_valid)
+
+    _, (b_line, valid_line) = jax.lax.scan(
+        scan_body, (theta0, jnp.array(False)), zeta_grid
+    )
+    return b_line, valid_line
+
+
+@jax.jit
+def compute_field_line_scan(alpha, zeta_grid, params):
+    b_line, _ = _compute_field_line_scan_with_mask(alpha, zeta_grid, params)
     return b_line
+
+
+@jax.jit
+def compute_all_grid_with_mask(alpha_grid, zeta_grid, params):
+    return jax.vmap(_compute_field_line_scan_with_mask, in_axes=(0, None, None))(
+        alpha_grid, zeta_grid, params
+    )
 
 
 @jax.jit

@@ -8,6 +8,17 @@ project aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 The Python package (`vmecdash`), the standalone Dash app and the VS Code extension
 (`vmecdash-viewer`) share a version number and are released together.
 
+## [0.2.1] - 2026-11-26
+
+### Fixed
+
+- Invert the VMEC poloidal-angle mapping with bracketed Newton iteration and a bisection
+  fallback. Flag folded or singular surfaces and leave gaps where field-line samples are invalid.
+- Space the initial angles of the 1-D field-line plots evenly and show the half-mesh flux
+  coordinate on all field-line plots.
+- Plot the single-line trace on a continuous toroidal angle and annotate its field periods,
+  toroidal turns, and near-rational return.
+
 ## [0.2.0] - 2026-09-29
 
 New physical quantities and new controls, plus changes to how existing figures are

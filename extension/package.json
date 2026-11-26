@@ -2,7 +2,7 @@
   "name": "vmecdash-viewer",
   "displayName": "VMECdash Viewer",
   "description": "Native VS Code viewer for VMEC wout NetCDF equilibria.",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "publisher": "HengqianLiu",
   "author": {
     "name": "USTC Stellarator Lab",

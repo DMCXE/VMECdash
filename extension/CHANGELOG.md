@@ -4,6 +4,16 @@ The Marketplace renders this file on the extension's Changelog tab. It covers th
 extension only; the full project changelog lives at the
 [repository root](https://github.com/DMCXE/VMECdash/blob/regularize/CHANGELOG.md).
 
+## [0.2.1] - 2026-11-26
+
+### Fixed
+
+- The `vmecdash` 0.2.1 Python backend improves field-line inversion and flags invalid
+  surfaces or samples in the viewer.
+- Field-line plots show the half-mesh flux coordinate, space initial angles evenly, and
+  report field periods, toroidal turns, and the near-rational return for single-line traces.
+- Upgrade the Python backend in the selected interpreter with `pip install --upgrade vmecdash`.
+
 ## [0.2.0] - 2026-09-29
 
 ### Added
